@@ -1,0 +1,22 @@
+{
+  "name": "board",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "esbuild": "^0.28.2",
+    "mathjax": "^3.2.2",
+    "pdfjs-dist": "^4.10.38",
+    "peerjs": "^1.5.5",
+    "perfect-freehand": "^1.2.3",
+    "trystero": "^0.26.0",
+    "y-indexeddb": "^9.0.12",
+    "yjs": "^13.6.33"
+  }
+}
