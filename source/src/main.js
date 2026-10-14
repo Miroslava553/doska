@@ -3,13 +3,14 @@ import { IndexeddbPersistence } from 'y-indexeddb';
 import { Hub, ManualConnect } from './sync.js';
 import {
   decodePts, encodePts, strokeOptions, outlinePath, paintInk, localBox, worldBox, geomWorldBox, itemTransform, hitItem, distSeg,
-  drawItem, drawBackground, setAsyncLoad, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES,
+  drawItem, drawBackground, setAsyncLoad, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf,
 } from './render.js';
 import { compileMany } from './expr.js';
+import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, regularSolid } from './solid.js';
 import { StrokeBuilder, oneEuro } from './pen.js';
-import { penCursor, eraserCursor } from './cursors.js';
+import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, moveCursor, vertexCursor } from './cursors.js';
 import { ICONS } from './icons.js';
-import { FIGS, figIcon } from './figs.js';
+import { FIGS, figIcon, figPrims } from './figs.js';
 
 // ============ утилиты ============
 const $ = (s, r = document) => r.querySelector(s);
@@ -52,6 +53,7 @@ const SIZE_CFG = {
   pen: { min: 0.5, max: 20, step: 0.5, presets: [1, 1.5, 2, 3, 4, 5, 6, 8, 10, 14], def: 3.5, name: 'Толщина' },
   hl: { min: 4, max: 64, step: 1, presets: [6, 10, 14, 20, 28, 36, 48], def: 20, name: 'Толщина маркера' },
   eraser: { min: 4, max: 120, step: 1, presets: [8, 12, 20, 28, 40, 56, 80], def: 28, name: 'Размер ластика' },
+  shape: { min: 0.5, max: 20, step: 0.5, presets: [1, 2, 3, 4, 6, 10], def: 3.5, name: 'Толщина фигур' },
   text: { min: 10, max: 96, step: 1, presets: [14, 18, 22, 28, 36, 48, 64], def: 28, name: 'Размер текста' },
 };
 const OLD_SIZES = { pen: [2, 3.5, 6], hl: [12, 20, 32], eraser: [12, 28, 56], text: [20, 28, 40] };
@@ -89,9 +91,10 @@ const prefs = Object.assign({
 }, LS.get('prefs', {}));
 if (prefs.wheel === 'auto') prefs.wheel = 'scroll';
 for (const k of Object.keys(SIZE_CFG)) {
+  if (k === 'shape') continue; // у фигур своя толщина появляется, только если её выбрали; иначе — как у ручки
   if (!(prefs.size[k] > 0)) prefs.size[k] = prefs.sizeIdx && prefs.sizeIdx[k] != null ? OLD_SIZES[k][prefs.sizeIdx[k]] : SIZE_CFG[k].def;
 }
-const sz = (k) => prefs.size[k];
+const sz = (k) => (k === 'shape' ? (prefs.shapeSize > 0 ? prefs.shapeSize : prefs.size.pen) : prefs.size[k]);
 const savePrefs = () => LS.set('prefs', prefs);
 if (!prefs.v9) { prefs.steady = Math.max(prefs.steady ?? 0, 0.85); prefs.v9 = 1; savePrefs(); }
 const me = { id: uid(), get name() { return prefs.name || 'Без имени'; }, get color() { return prefs.color; } };
@@ -443,10 +446,7 @@ function startBoard(room) {
     viewSendT = setTimeout(() => { viewSendT = 0; hub.broadcast(viewMsg()); }, 120);
   }
   let curSendAt = 0;
-  function sendCursor(wx, wy) {
-    const now = performance.now(); if (now - curSendAt < 40) return; curSendAt = now;
-    hub.broadcast({ t: 'cur', id: me.id, name: me.name, color: me.color, x: wx, y: wy, page: S.page });
-  }
+  function sendCursor() {} // курсор собеседнику не показываем и не отправляем
 
   // живой штрих — накапливаем точки и отправляем раз в кадр
   let liveOut = null, liveFlushT = 0;
@@ -489,25 +489,23 @@ function startBoard(room) {
       }
       if (bb) {
         const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]);
-        octx.setLineDash([5, 4]); octx.strokeRect(x0 - 5, y0 - 5, x1 - x0 + 10, y1 - y0 + 10); octx.setLineDash([]);
-        handles(bb).forEach(([hx, hy], i) => {
-          octx.fillStyle = '#fff';
-          if (i < 4) { octx.fillRect(hx - 5, hy - 5, 10, 10); octx.strokeRect(hx - 5, hy - 5, 10, 10); }
-          else { const w = i % 2 === 0 ? 16 : 6, h = i % 2 === 0 ? 6 : 16; octx.beginPath(); octx.roundRect(hx - w / 2, hy - h / 2, w, h, 3); octx.fill(); octx.stroke(); }
+        const P = selPad();
+        octx.setLineDash([5, 4]); octx.strokeRect(x0 - P, y0 - P, x1 - x0 + 2 * P, y1 - y0 + 2 * P); octx.setLineDash([]);
+        const lineSel = S.sel.size === 1 && ['line', 'arrow'].includes(items.get([...S.sel][0])?.type);
+        handles(bb).forEach((h, i) => {
+          if (!h) return; const [hx, hy] = h;
+          if (i < 4) { octx.fillStyle = '#fff'; octx.fillRect(hx - 3.5, hy - 3.5, 7, 7); octx.strokeRect(hx - 3.5, hy - 3.5, 7, 7); return; } // небольшие квадратики: здесь размер, чуть снаружи — поворот
+          if (!lineSel && (i % 2 === 0 ? x1 - x0 : y1 - y0) < 26) return; // на короткой стороне палочку не рисуем, но тянуть за сторону можно
+          const w = i % 2 === 0 ? 16 : 6, hh = i % 2 === 0 ? 6 : 16;
+          octx.fillStyle = '#4c6ef5'; octx.strokeStyle = '#fff'; octx.lineWidth = 1.5; // палочки залиты — сразу видно, за что тянуть
+          octx.beginPath(); octx.roundRect(hx - w / 2, hy - hh / 2, w, hh, 3); octx.fill(); octx.stroke();
+          octx.strokeStyle = '#4c6ef5'; octx.lineWidth = 1;
         });
+        const es = !S.ov && editSel(); if (es) drawEditHandles(octx, es);
       }
     }
     if (g && g.drawScreen) g.drawScreen(octx);
     // чужие курсоры — только если включено в меню (по умолчанию скрыты)
-    if (prefs.peerCursor) for (const [id, c] of remoteCursors) {
-      if (c.page !== S.page) continue;
-      if (Date.now() - c.at > 15000) { remoteCursors.delete(id); continue; }
-      const [sx, sy] = toScreen(c.x, c.y);
-      octx.fillStyle = c.color; octx.strokeStyle = '#fff'; octx.lineWidth = 1.5;
-      octx.beginPath(); octx.moveTo(sx, sy); octx.lineTo(sx + 4, sy + 15); octx.lineTo(sx + 7.5, sy + 9); octx.lineTo(sx + 14, sy + 8); octx.closePath(); octx.stroke(); octx.fill();
-      octx.font = `12px ${FONT}`; const tw = octx.measureText(c.name).width;
-      octx.fillRect(sx + 12, sy + 14, tw + 10, 18); octx.fillStyle = '#fff'; octx.fillText(c.name, sx + 17, sy + 27);
-    }
   }
 
   // ---------- страницы ----------
@@ -646,18 +644,39 @@ function startBoard(room) {
     return b;
   }
   // 0–3 углы (пропорционально), 4–7 середины сторон (верх, право, низ, лево — растянуть по одной оси)
+  // Отступ рамки: если у фигуры есть точки-вершины, рамка отходит дальше — углы рамки не налезают на вершины
+  const selPad = () => { const e = editSel(); return e && e.k !== 'rot' ? 14 : 5; };
   function handles(bb) {
-    const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]);
-    const hs = [[x0 - 5, y0 - 5], [x1 + 5, y0 - 5], [x1 + 5, y1 + 5], [x0 - 5, y1 + 5]];
+    const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]); const P = selPad();
     const its = [...S.sel].map((id) => items.get(id)).filter(Boolean);
-    const stretchable = its.some((i) => !['text', 'tex'].includes(i.type));
-    if (stretchable && x1 - x0 > 26 && y1 - y0 > 26) {
-      const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
-      hs.push([mx, y0 - 5], [x1 + 5, my], [mx, y1 + 5], [x0 - 5, my]);
-    }
+    const isLine = its.length === 1 && (its[0].type === 'line' || its[0].type === 'arrow');
+    const hs = isLine ? [null, null, null, null] : [[x0 - P, y0 - P], [x1 + P, y0 - P], [x1 + P, y1 + P], [x0 - P, y1 + P]];
+    // повёрнутый эллипс по одной оси не растягиваем — только целиком за угол
+    const stretchable = its.some((i) => !['text', 'tex'].includes(i.type)) && !its.some((i) => rotOf(i));
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    const one = its.length === 1 ? its[0] : null;
+    if (one && (one.type === 'line' || one.type === 'arrow')) {
+      // у линии — две палочки по бокам: растянуть по длине (для пологой — слева/справа, для крутой — сверху/снизу)
+      if (Math.abs(one.x2 - one.x1) >= Math.abs(one.y2 - one.y1)) hs.push(null, [x1 + P, my], null, [x0 - P, my]);
+      else hs.push([mx, y0 - P], null, [mx, y1 + P], null);
+    } else if (stretchable) hs.push([mx, y0 - P], [x1 + P, my], [mx, y1 + P], [x0 - P, my]);
     return hs;
   }
-  const handleCursor = (hi) => (hi < 4 ? (hi % 2 === 0 ? 'nwse-resize' : 'nesw-resize') : (hi % 2 === 0 ? 'ns-resize' : 'ew-resize'));
+  // Какая ручка под курсором: квадратик в углу или сторона рамки по всей длине (кроме самых углов)
+  function handleAt(bb, x, y) {
+    const hs = handles(bb);
+    const hi = hs.findIndex((h, i) => h && i < 4 && Math.abs(h[0] - x) < 8 && Math.abs(h[1] - y) < 8);
+    if (hi >= 0) return hi;
+    const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]); const P = selPad();
+    const L = x0 - P, R = x1 + P, T = y0 - P, B = y1 + P, M = 9;
+    const inX = x > L + M && x < R - M, inY = y > T + M && y < B - M;
+    if (hs[4] && inX && Math.abs(y - T) < 6) return 4;
+    if (hs[5] && inY && Math.abs(x - R) < 6) return 5;
+    if (hs[6] && inX && Math.abs(y - B) < 6) return 6;
+    if (hs[7] && inY && Math.abs(x - L) < 6) return 7;
+    return -1;
+  }
+  const handleCursor = (hi) => resizeCursor([45, 135, 45, 135, 90, 0, 90, 0][hi] || 0);
   // «Запекаем» растяжение по осям в геометрию объекта (чтобы линии не становились толще с одной стороны)
   function bakeStretch(it, ov) {
     const kx = ov.kx, ky = ov.ky;
@@ -861,15 +880,19 @@ function startBoard(room) {
     hoverRaf = requestAnimationFrame(() => {
       hoverRaf = 0; if (gesture || S.tool !== 'select' || S.space) return;
       const [x, y] = hoverXY; let c = 'default';
+      const es = editSel(); const sh = es && editHit(es, x, y);
+      const hv = sh && sh.mode === 'vertex' ? { id: es.it.id, i: sh.i } : null;
+      if ((hv && hv.i) !== (S.hoverVert && S.hoverVert.i) || (hv && hv.id) !== (S.hoverVert && S.hoverVert.id)) { S.hoverVert = hv; invalidate(false); }
+      if (sh) { cvOver.style.cursor = sh.mode === 'vertex' ? 'none' : sh.mode === 'roll' ? rotateCursor(sh.k) : 'grab'; return; }
       if (S.sel.size) {
         const bb = selectionBox();
         if (bb) {
-          const hi = handles(bb).findIndex(([hx, hy]) => Math.abs(hx - x) < 10 && Math.abs(hy - y) < 10);
+          const hi = handleAt(bb, x, y);
           if (hi >= 0) c = handleCursor(hi);
-          else { const [wx, wy] = toWorld(x, y); if (wx >= bb[0] && wx <= bb[2] && wy >= bb[1] && wy <= bb[3]) c = 'move'; }
+          else { const [wx, wy] = toWorld(x, y); if (wx >= bb[0] && wx <= bb[2] && wy >= bb[1] && wy <= bb[3]) c = moveCursor(); }
         }
       }
-      if (c === 'default') { const [wx, wy] = toWorld(x, y); if (topHit(wx, wy)) c = 'move'; }
+      if (c === 'default') { const [wx, wy] = toWorld(x, y); c = topHit(wx, wy) ? moveCursor() : selectCursor(); }
       cvOver.style.cursor = c;
     });
   }
@@ -1172,7 +1195,7 @@ function startBoard(room) {
 
   // фигуры
   function shapeGesture(pt) {
-    const tool = S.tool; const color = prefs.penColor; const size = sz('pen') * 0.9;
+    const tool = S.tool; const color = prefs.penColor; const size = sz('shape') * 0.9;
     let cur = pt, shift = false;
     const isFig = tool.startsWith('fig:');
     const clickOnly = () => Math.hypot(cur[3] - pt[3], cur[4] - pt[4]) < 4;
@@ -1216,7 +1239,7 @@ function startBoard(room) {
   let poly = null; // {pts:[[x,y]], cur:[x,y], t}
   function polyClick(pt) {
     const now = Date.now(); const close = 10 / S.view.z;
-    if (!poly) { poly = { pts: [[pt[0], pt[1]]], cur: [pt[0], pt[1]], t: now, color: prefs.penColor, size: sz('pen') * 0.9 }; invalidate(false); return; }
+    if (!poly) { poly = { pts: [[pt[0], pt[1]]], cur: [pt[0], pt[1]], t: now, color: prefs.penColor, size: sz('shape') * 0.9 }; invalidate(false); return; }
     const first = poly.pts[0], last = poly.pts[poly.pts.length - 1];
     if (poly.pts.length >= 3 && Math.hypot(pt[0] - first[0], pt[1] - first[1]) < close) { finishPoly(true); return; }
     if (now - poly.t < 350 && Math.hypot(pt[0] - last[0], pt[1] - last[1]) < close) { finishPoly(false); return; }
@@ -1243,13 +1266,197 @@ function startBoard(room) {
 
   // выделение: клик, рамка/лассо, перенос, масштаб, двойной клик — редактирование
   let lastClick = { t: 0, id: null };
+  // ---------- поворот и вершины у одной выделенной фигуры ----------
+  // solid — стереометрия (3D), line — отрезок/стрелка (концы), poly — многоугольники (вершины), rot — эллипс и прочее (только поворот)
+  const ROT_R = 13; // радиус дуг поворота вокруг углов рамки
+  const POLY_FIGS = new Set(['triangle', 'eqtriangle', 'rtriangle', 'square', 'parallelogram', 'trapezoid', 'rhombus', 'pentagon', 'hexagon']);
+  function editKind(it) {
+    if (!it || it.locked) return null;
+    if (it.type === 'fig' && SOLID_KINDS.has(it.kind)) return 'solid';
+    if (it.type === 'line' || it.type === 'arrow') return 'line';
+    if (it.type === 'rect' || (it.type === 'poly' && it.pts.length >= 2) || (it.type === 'fig' && POLY_FIGS.has(it.kind))) return 'poly';
+    if (it.type === 'ellipse' || it.type === 'fig') return 'rot';
+    return null;
+  }
+  function editSel() { if (S.sel.size !== 1) return null; const it = items.get([...S.sel][0]); const k = editKind(it); return k ? { it, k } : null; }
+  const solidSel = () => { const e = editSel(); return e && e.k === 'solid' ? e.it : null; };
+  // вершины многоугольника в его собственных координатах
+  function polyLocal(it) {
+    if (it.type === 'rect') return [[0, 0], [it.w, 0], [it.w, it.h], [0, it.h]];
+    if (it.type === 'poly') return it.pts;
+    return figPrims(it).filter((p) => p.t === 'l').map((p) => [p.a[0] * it.w, p.a[1] * it.h]);
+  }
+  function editVerts(it, k) { // [{i, w:[x,y] мир}]
+    const s = it.s || 1, W = (px, py) => [it.x + px * s, it.y + py * s];
+    if (k === 'line') return [{ i: 0, w: W(it.x1, it.y1) }, { i: 1, w: W(it.x2, it.y2) }];
+    if (k === 'poly') return polyLocal(it).map(([px, py], i) => ({ i, w: W(px, py) }));
+    if (k === 'solid') return solidHandles(it).map(({ i, p }) => ({ i, w: W(p[0], p[1]) }));
+    return [];
+  }
+  function editHandlesScreen(e) {
+    const bb = selectionBox(); const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]); const P = selPad();
+    const big = x1 - x0 > 34 || y1 - y0 > 34;
+    const corners = [[x0 - P, y0 - P], [x1 + P, y0 - P], [x1 + P, y1 + P], [x0 - P, y1 + P]];
+    return {
+      corners, rot: corners.map(([x, y], k) => { const m = [-3, -1, 1, 3][k] * Math.PI / 4; return [x + ROT_R * Math.cos(m), y + ROT_R * Math.sin(m)]; }), // середина дуги
+      orbit: e.k === 'solid' ? [(x0 + x1) / 2, y1 + selPad() + 26] : null, c: [(x0 + x1) / 2, (y0 + y1) / 2],
+      verts: big || e.k === 'line' ? editVerts(e.it, e.k).map((v) => ({ i: v.i, p: toScreen(v.w[0], v.w[1]) })) : [],
+    };
+  }
+  function editHit(e, x, y) {
+    const H = editHandlesScreen(e); const d = (p) => Math.hypot(p[0] - x, p[1] - y);
+    let best = null, bd = 9;
+    for (const v of H.verts) { const dv = d(v.p); if (dv < bd) { bd = dv; best = { mode: 'vertex', i: v.i }; } }
+    const hs = handles(selectionBox()).filter(Boolean); // ручка размера ближе вершины — значит, тянут размер
+    if (best && hs.some((h) => d(h) < bd)) best = null;
+    if (best) return best;
+    // поворот — зона чуть снаружи угла рамки (на самом квадратике — изменение размера)
+    if (hs.some((h) => Math.abs(h[0] - x) < 8 && Math.abs(h[1] - y) < 8)) return null;
+    const out = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    for (let k = 0; k < 4; k++) {
+      const [cx, cy] = H.corners[k], dc = Math.hypot(x - cx, y - cy);
+      if (dc > 4 && dc < 24 && (x - cx) * out[k][0] > -3 && (y - cy) * out[k][1] > -3) return { mode: 'roll', c: H.c, k };
+    }
+    if (H.orbit && d(H.orbit) < 12) return { mode: 'orbit' };
+    return null;
+  }
+  const solidHit = (it, x, y) => editHit({ it, k: 'solid' }, x, y);
+  function drawEditHandles(c, e) {
+    const H = editHandlesScreen(e);
+    c.save(); c.lineCap = 'round'; c.lineJoin = 'round';
+    if (H.orbit) {
+      const [ox, oy] = H.orbit;
+      c.fillStyle = '#fff'; c.strokeStyle = '#4c6ef5'; c.lineWidth = 1.4; c.beginPath(); c.arc(ox, oy, 10, 0, Math.PI * 2); c.fill(); c.stroke();
+      c.lineWidth = 1.6; c.beginPath(); c.ellipse(ox, oy, 6, 2.6, 0, 0.3, Math.PI * 2 - 0.7); c.stroke();
+      c.beginPath(); c.moveTo(ox + 3.4, oy - 4.4); c.lineTo(ox + 6.2, oy - 1.2); c.lineTo(ox + 2.6, oy); c.stroke();
+      c.beginPath(); c.moveTo(ox, oy - 6); c.lineTo(ox, oy + 6); c.stroke();
+    }
+    for (const v of H.verts) {
+      const hot = S.hoverVert && S.hoverVert.id === e.it.id && S.hoverVert.i === v.i;
+      if (e.k === 'line' && !hot) continue; // у линии точки на концах не рисуем — их видно, когда подводишь курсор
+      c.fillStyle = hot ? '#4c6ef5' : '#fff'; c.strokeStyle = hot ? '#fff' : '#4c6ef5'; c.lineWidth = 2;
+      c.beginPath(); c.arc(v.p[0], v.p[1], hot ? 6 : 4.5, 0, Math.PI * 2); c.fill(); c.stroke();
+    }
+    c.restore();
+  }
+  // Точка вершины, за которую тянут: крупная, залитая, ровно на вершине
+  function vertexDot(c, x, y) { c.save(); c.fillStyle = '#4c6ef5'; c.strokeStyle = '#fff'; c.lineWidth = 2; c.beginPath(); c.arc(x, y, 6, 0, Math.PI * 2); c.fill(); c.stroke(); c.restore(); }
+  // Подпись угла рядом с курсором, пока поворачиваете
+  function drawAngleTag(c, deg, sx, sy) {
+    const t = (Math.round(((deg % 360) + 540) % 360 - 180)) + '°';
+    c.save(); c.font = '600 12px system-ui, sans-serif'; const w = c.measureText(t).width + 12;
+    c.fillStyle = 'rgba(33,37,41,.88)'; c.beginPath(); c.roundRect(sx + 16, sy + 14, w, 20, 6); c.fill();
+    c.fillStyle = '#fff'; c.fillText(t, sx + 22, sy + 28); c.restore();
+  }
+  // Поворот и вершины у плоских фигур
+  function editGesture(e, hit, pt) {
+    if (e.k === 'solid') return solidGesture(e.it, hit, pt);
+    const it = e.it, k = e.k, s = it.s || 1;
+    const { _lb, _segs, _sv, _pts, _path, ...clean } = it;
+    const V0 = editVerts(it, k).map((v) => v.w);
+    const wc = toWorld(hit.c ? hit.c[0] : 0, hit.c ? hit.c[1] : 0);
+    const ang = (p) => Math.atan2(p[1] - wc[1], p[0] - wc[0]) * 180 / Math.PI;
+    const rot0 = it.rot || 0;
+    let tmp = clean, moved = false, shown = 0, last = pt;
+    S.hidden = new Set([it.id]); invalidate();
+    cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : rotateCursor(hit.k);
+    // центр вращения многоугольника и отрезка — середина рамки вершин
+    const vc = (() => { const xs = V0.map((q) => q[0]), ys = V0.map((q) => q[1]); return [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2]; })();
+    const rotW = (W, d) => { const r = d * Math.PI / 180, c = Math.cos(r), si = Math.sin(r); return W.map(([x, y]) => [vc[0] + (x - vc[0]) * c - (y - vc[1]) * si, vc[1] + (x - vc[0]) * si + (y - vc[1]) * c]); };
+    const fromWorld = (W) => {
+      if (k === 'line') return { ...clean, x1: (W[0][0] - it.x) / s, y1: (W[0][1] - it.y) / s, x2: (W[1][0] - it.x) / s, y2: (W[1][1] - it.y) / s };
+      // многоугольник: прямоугольник и фигуры из списка становятся многоугольником по вершинам
+      const x0 = Math.min(...W.map((q) => q[0])), y0 = Math.min(...W.map((q) => q[1]));
+      const out = { id: it.id, type: 'poly', page: it.page, z: it.z, x: x0, y: y0, s: 1, color: it.color, size: it.size, closed: it.type === 'poly' ? !!it.closed : true, pts: W.map(([x, y]) => [x - x0, y - y0]) };
+      if (it.dash) { out.dash = true; if (it.doff) out.doff = it.doff; if (it.dfig) out.dfig = true; }
+      if (it.fill) out.fill = true;
+      const fk = it.type === 'fig' ? it.kind : it.type === 'rect' ? 'rect' : it.fk; if (fk) out.fk = fk;
+      return out;
+    };
+    return {
+      hideSel: true,
+      move(p, ev) {
+        moved = true; last = p;
+        if (hit.mode === 'vertex') {
+          const W = V0.map((q) => q.slice()); let nx = V0[hit.i][0] + p[0] - pt[0], ny = V0[hit.i][1] + p[1] - pt[1];
+          if (k === 'line' && ev && ev.shiftKey) { // Shift — направление шагом 15°
+            const o = V0[1 - hit.i], L = Math.hypot(nx - o[0], ny - o[1]), a = Math.round(Math.atan2(ny - o[1], nx - o[0]) / (Math.PI / 12)) * (Math.PI / 12);
+            nx = o[0] + L * Math.cos(a); ny = o[1] + L * Math.sin(a);
+          }
+          W[hit.i] = [nx, ny]; tmp = fromWorld(W);
+        } else {
+          let d = ang(p) - ang(pt); if (d > 180) d -= 360; if (d < -180) d += 360;
+          if (k === 'rot') { let r = rot0 + d; if (ev && ev.shiftKey) r = Math.round(r / 15) * 15; tmp = { ...clean, rot: Math.round(r * 10) / 10 }; shown = r; }
+          else { if (ev && ev.shiftKey) d = Math.round(d / 15) * 15; tmp = fromWorld(rotW(V0, d)); shown = d; }
+        }
+        invalidate(false);
+      },
+      drawOver(c) { drawItem(c, tmp, null, S.view.z); },
+      drawScreen(c) {
+        if (hit.mode === 'vertex') { const v = editVerts(tmp.type === 'poly' && k === 'poly' ? { ...tmp } : tmp, k)[hit.i] || null; if (v) vertexDot(c, ...toScreen(v.w[0], v.w[1])); }
+      },
+      end() {
+        S.hidden = new Set(); updateCursor();
+        if (!moved) { invalidate(); return; }
+        act(() => {
+          if (tmp.type === 'poly' && it.type !== 'poly') { yItems.delete(it.id); addItem(tmp); } // стал многоугольником — тот же id, выделение остаётся
+          else if (tmp.type === 'poly') setFields(it.id, { x: tmp.x, y: tmp.y, s: 1, pts: tmp.pts });
+          else if (k === 'line') setFields(it.id, { x1: tmp.x1, y1: tmp.y1, x2: tmp.x2, y2: tmp.y2 });
+          else setFields(it.id, { rot: tmp.rot });
+        });
+        S.sel = new Set([it.id]); invalidate();
+      },
+      cancel() { S.hidden = new Set(); invalidate(); },
+    };
+  }
+  // Поворот на доске (roll), поворот в пространстве (orbit), перетаскивание вершины (vertex). Shift — шаг 15°.
+  function solidGesture(it, hit, pt) {
+    const base = prepared(it); const v0 = viewOf(base); const s = it.s || 1;
+    let tmp = base, moved = false, lastS = [pt[3], pt[4]];
+    S.hidden = new Set([it.id]); invalidate();
+    const snap = (a, ev) => (ev && ev.shiftKey ? Math.round(a / 15) * 15 : Math.round(a * 10) / 10);
+    const wc = hit.c ? toWorld(hit.c[0], hit.c[1]) : null;
+    const ang = (p) => Math.atan2(p[1] - wc[1], p[0] - wc[0]) / (Math.PI / 180);
+    cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : hit.mode === 'roll' ? rotateCursor(hit.k) : 'grabbing';
+    return {
+      hideSel: true,
+      move(p, ev) {
+        moved = true; lastS = [p[3], p[4]];
+        if (hit.mode === 'vertex') {
+          const m = moveVertex(base, hit.i, (p[0] - pt[0]) / s, (p[1] - pt[1]) / s);
+          const pin = solidHandles(base).find((h) => h.i !== hit.i)?.i ?? 'c';
+          tmp = { ...base, ...reproject(base, v0, m, pin) };
+        } else if (hit.mode === 'roll') {
+          let d = ang(p) - ang(pt); if (d > 180) d -= 360; if (d < -180) d += 360;
+          tmp = { ...base, ...reproject(base, { ...v0, roll: snap(v0.roll - d, ev) }, base.m) };
+        } else {
+          const dx = (p[3] - pt[3]), dy = (p[4] - pt[4]);
+          tmp = { ...base, ...reproject(base, { ...v0, yaw: snap(v0.yaw - dx * 0.6, ev), pitch: Math.max(-85, Math.min(85, snap(v0.pitch + dy * 0.4, ev))) }, base.m) };
+        }
+        delete tmp._sv; invalidate(false);
+      },
+      drawOver(c) { drawItem(c, tmp, null, S.view.z); },
+      drawScreen(c) {
+        if (hit.mode === 'vertex') { const h = solidHandles(tmp).find((q) => q.i === hit.i); if (h) { const ss = tmp.s || 1; vertexDot(c, ...toScreen(tmp.x + h.p[0] * ss, tmp.y + h.p[1] * ss)); } }
+      },
+      end() {
+        S.hidden = new Set(); updateCursor();
+        if (!moved) { invalidate(); return; }
+        const r4 = (x) => Math.round(x * 1e4) / 1e4;
+        act(() => setFields(it.id, { m: tmp.m.map((q) => q.map(r4)), yaw: tmp.yaw, pitch: tmp.pitch, roll: tmp.roll, x: tmp.x, y: tmp.y, w: tmp.w, h: tmp.h }));
+      },
+      cancel() { S.hidden = new Set(); invalidate(); },
+    };
+  }
   function selectGesture(pt, e) {
     const [sx, sy] = [pt[3], pt[4]];
+    const es = editSel();
+    if (es) { const h = editHit(es, sx, sy); if (h) return editGesture(es, h, pt); }
     // ручки масштаба
     if (S.sel.size) {
       const bb = selectionBox();
       const hs = handles(bb);
-      const hi = hs.findIndex(([hx, hy]) => Math.abs(hx - sx) < 9 && Math.abs(hy - sy) < 9);
+      const hi = handleAt(bb, sx, sy);
       // масштаб считаем от рамки самой геометрии (без запаса на толщину линий) — размеры точные, ничего не «уплывает»
       let gb = null;
       for (const id of S.sel) { const it = items.get(id); if (!it) continue; const w = geomWorldBox(it); gb = gb ? [Math.min(gb[0], w[0]), Math.min(gb[1], w[1]), Math.max(gb[2], w[2]), Math.max(gb[3], w[3])] : w; }
@@ -1322,7 +1529,7 @@ function startBoard(room) {
           S.ov.dx = p[0] - pt[0]; S.ov.dy = p[1] - pt[1];
           if (ev && ev.altKey && !(hit && hit.locked)) S.ov.copy = true;
           if (Math.hypot(p[3] - sx, p[4] - sy) > 2) moved = true;
-          cvOver.style.cursor = S.ov.copy ? 'copy' : 'move';
+          cvOver.style.cursor = S.ov.copy ? 'copy' : moveCursor();
           invalidate();
         },
         end() {
@@ -1558,6 +1765,10 @@ function startBoard(room) {
     };
     if (it.locked) return undefined;
     if (it.type === 'rect' || it.type === 'ellipse') return fit(1);
+    if (it.type === 'fig' && SOLID_KINDS.has(it.kind)) {
+      if (!it.m) return fit(it.h / it.w > 0 ? FIGS[it.kind]?.aspect || 1 : 1);
+      return probe ? {} : regularSolid(it);
+    }
     if (it.type === 'fig') {
       if (it.kind === 'triangle') return fit(SQ3, { kind: 'eqtriangle' }); // «правильный» треугольник — равносторонний
       return fit(FIGS[it.kind]?.aspect || 1);
@@ -1690,25 +1901,6 @@ function startBoard(room) {
       selBar._sync();
       selBar.append(el('div', { class: 'isep' }));
     }
-    // угол фигуры (треугольники, параллелограмм, трапеция, ромб)
-    const one = its.length === 1 ? its[0] : null;
-    const angDef = one && one.type === 'fig' && !one.locked ? FIGS[one.kind]?.angle : null;
-    if (angDef) {
-      const cur = () => { const it = items.get(one.id); return it ? angDef.get(it) : 0; };
-      const val = el('span', { class: 'sz-val' });
-      const range = el('input', { type: 'range', class: 'sz-range', min: angDef.min, max: angDef.max, step: 1, value: Math.round(cur()) });
-      const paint = () => { if (!selBar._dragging) range.value = Math.round(cur()); val.textContent = Math.round(selBar._dragging ? +range.value : cur()) + '°'; };
-      const begin = () => { if (selBar._dragging) return; selBar._dragging = true; undo.stopCapturing(); undo.captureTimeout = 1e9; };
-      const finish = () => { if (!selBar._dragging) return; selBar._dragging = false; undo.captureTimeout = 0; undo.stopCapturing(); selBar.dataset.key = ''; updateSelBar(); };
-      range.addEventListener('pointerdown', begin); range.addEventListener('keydown', begin);
-      range.addEventListener('input', () => { begin(); const it = items.get(one.id); if (it) act(() => setFields(one.id, angDef.set(it, +range.value))); val.textContent = range.value + '°'; });
-      range.addEventListener('change', () => { finish(); range.blur(); });
-      range.addEventListener('pointerup', finish); range.addEventListener('blur', finish);
-      selBar.append(el('div', { class: 'isize', title: angDef.label }, el('span', { class: 'ic', html: ICONS.angle }), el('div', { class: 'sz-row' }, range, val)));
-      const prevSync = selBar._sync; selBar._sync = () => { prevSync?.(); paint(); };
-      paint();
-      selBar.append(el('div', { class: 'isep' }));
-    }
     const acts = selectionActions(its);
     acts.forEach((a, i) => {
       if (a.ic === 'copy' && i > 0) selBar.append(el('div', { class: 'isep' }));
@@ -1731,10 +1923,12 @@ function startBoard(room) {
     const topLimit = pos === 'top' ? tbr.bottom + 8 : 62;
     const bottomLimit = pos === 'bottom' ? tbr.top - 8 : H - 8;
     const rightLimit = pos === 'right' ? tbr.left - 8 : W - 8;
-    let top = y0 - h - 18;
-    if (top < topLimit) top = y1 + 18;
+    const leftLimit = pos === 'left' ? tbr.right + 8 : 8;
+    const es = editSel(); const gapT = es ? 42 : 18, gapB = es && es.k === 'solid' ? 64 : es ? 42 : 18; // стрелки поворота у углов, у стереометрии снизу — вращение
+    let top = y0 - h - gapT;
+    if (top < topLimit) top = y1 + gapB;
     if (top + h > bottomLimit) top = Math.max(topLimit, Math.min(y0 + 8, bottomLimit - h));
-    selBar.style.left = Math.round(clamp((x0 + x1) / 2 - w / 2, 8, rightLimit - w)) + 'px';
+    selBar.style.left = Math.round(clamp((x0 + x1) / 2 - w / 2, leftLimit, rightLimit - w)) + 'px';
     selBar.style.top = Math.round(top) + 'px';
     selBar.classList.remove('away');
   }
@@ -1836,6 +2030,8 @@ function startBoard(room) {
       if (t === 'select') { prefs.lasso = !prefs.lasso; savePrefs(); }
     }
     if (poly) finishPoly(false);
+    // фигуру выбрали заново (пришли от другого инструмента) — толщина снова как у ручки
+    if (GROUPS.shapes.tools.includes(t) && !GROUPS.shapes.tools.includes(S.tool) && prefs.shapeSize != null) { prefs.shapeSize = null; savePrefs(); }
     S.tool = t; S.autoBack = null; closeEditors(true);
     if (INK_TOOLS.has(t) && prefs.lastInk !== t) { prefs.lastInk = t; savePrefs(); }
     for (const [gn, g] of Object.entries(GROUPS)) if (g.tools.includes(t)) { prefs['last_' + gn] = t; savePrefs(); }
@@ -1845,10 +2041,10 @@ function startBoard(room) {
   function updateCursor() {
     const c = INK_TOOLS.has(S.tool) ? penCursor(S.tool === 'hl' ? 'hl' : S.tool === 'dpen' ? 'dash' : 'pen', currentColor())
       : S.tool === 'eraser' ? eraserCursor(eraserRadius() * 2, prefs.eraserPrecise)
-      : { select: 'default', hand: 'grab', text: 'text' }[S.tool] || 'crosshair';
+      : S.tool === 'select' ? selectCursor() : { hand: 'grab', text: 'text' }[S.tool] || 'crosshair';
     cvOver.style.cursor = S.space ? 'grab' : c;
   }
-  const sizeKey = () => (S.tool === 'hl' ? 'hl' : S.tool === 'eraser' ? 'eraser' : S.tool === 'text' || S.tool === 'tex' ? 'text' : 'pen');
+  const sizeKey = () => (S.tool === 'hl' ? 'hl' : S.tool === 'eraser' ? 'eraser' : S.tool === 'text' || S.tool === 'tex' ? 'text' : GROUPS.shapes.tools.includes(S.tool) ? 'shape' : 'pen');
   // [ и ] — к соседнему готовому значению
   function sizeStep(d) {
     const k = sizeKey(); const P = SIZE_CFG[k].presets; const v = sz(k);
@@ -1859,7 +2055,7 @@ function startBoard(room) {
   // onlySel — из панели выделения: меняем только выделенное, перо остаётся прежним
   function setSize(k, v, applyToSel, onlySel = false) {
     const c = SIZE_CFG[k]; v = clamp(Math.round(v / c.step) * c.step, c.min, c.max);
-    if (!onlySel) { prefs.size[k] = v; savePrefs(); updateCursor(); }
+    if (!onlySel) { if (k === 'shape') prefs.shapeSize = v; else prefs.size[k] = v; savePrefs(); updateCursor(); }
     queueMicrotask(() => { sizePaint?.(); selBar._sync?.(); });
     if (applyToSel && S.sel.size && k !== 'eraser') {
       act(() => {
@@ -1869,10 +2065,18 @@ function startBoard(room) {
           if (k === 'text' && it.type === 'text') put('fs', v);
           else if (k === 'hl' && it.type === 'stroke' && it.kind === 'hl') put('size', v);
           else if (k === 'pen' && it.type === 'stroke' && it.kind !== 'hl') put('size', it.kind === 'dash' ? v * 0.9 : v);
-          else if (k === 'pen' && SIZED_SHAPES.includes(it.type)) put('size', v * 0.9);
+          else if ((k === 'pen' || k === 'shape') && SIZED_SHAPES.includes(it.type)) put('size', v * 0.9);
         }
       });
     }
+  }
+  // Толщина фигур прямо в меню фигур: ползунок с шагом 0,5. Каждый новый выбор фигуры начинается с толщины ручки.
+  function shapeSizeRow() {
+    const toShape = () => { if (!GROUPS.shapes.tools.includes(S.tool)) { const l = prefs.last_shapes; setTool(l && GROUPS.shapes.tools.includes(l) ? l : 'line', { noToggle: true }); } };
+    const row = sizeRow('shape', () => sz('shape'), (v, final) => { toShape(); setSize('shape', v, false); }, false);
+    const wrap = el('div', { class: 'shape-size', title: 'Толщина фигур' }, el('span', { class: 'ic', html: ICONS.sizeLine }), row.el);
+    sizePaint = row.paint;
+    return wrap;
   }
   // Толщина выпадает у своего инструмента: перо, пунктир, маркер, ластик, текст
   const SIZE_OF = { pen: 'pen', dpen: 'pen', hl: 'hl', eraser: 'eraser', text: 'text' };
@@ -1980,7 +2184,6 @@ function startBoard(room) {
       if (k === 'f') { toggleFollow(); return; }
       if (k === 's') { summon(); return; }
       if (k === 'n') { addPage(); return; }
-      if (k === 'c') { togglePeerCursor(); return; }
       if (k === '1') { fitContent(); return; }
       return;
     }
@@ -2129,14 +2332,31 @@ function startBoard(room) {
     let s = ''; for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
     download(new Blob([JSON.stringify({ format: 'doska', v: 1, room, saved: new Date().toISOString(), update: btoa(s) })], { type: 'application/json' }), `Урок ${stamp()}.doska`);
   }
+  // Урок из файла .doska добавляется на новые листы этой доски (ничего на доске не заменяет).
+  // Так можно вернуть урок после смены браузера или режима инкогнито: сохранили Ctrl+S — открыли здесь.
   function importLesson() {
     const inp = el('input', { type: 'file', accept: '.doska,.json' });
     inp.onchange = async () => {
+      const f = inp.files[0]; if (!f) return;
       try {
-        const o = JSON.parse(await inp.files[0].text());
+        const o = JSON.parse(await f.text());
         if (o.format !== 'doska') throw new Error('это не файл урока');
-        Y.applyUpdate(doc, Uint8Array.from(atob(o.update), (c) => c.charCodeAt(0)), NOUNDO);
-        toast('Урок загружен');
+        const src = new Y.Doc();
+        Y.applyUpdate(src, Uint8Array.from(atob(o.update), (c) => c.charCodeAt(0)));
+        const sp = src.getMap('pages'), si = src.getMap('items');
+        const srcPages = [...sp.entries()].filter(([, m]) => !m.get('deletedAt')).map(([id, m]) => ({ id, name: m.get('name') || 'Лист', order: m.get('order') || 0 })).sort((a, b) => a.order - b.order);
+        const byPage = new Map(srcPages.map((p) => [p.id, []]));
+        si.forEach((m) => { const it = m.toJSON(); if (byPage.has(it.page)) byPage.get(it.page).push(it); });
+        const withItems = srcPages.filter((p) => byPage.get(p.id).length);
+        if (!withItems.length) { toast('В файле нет записей'); return; }
+        const base = f.name.replace(/\.(doska|json)$/i, '').slice(0, 24);
+        let after = S.page, first = null;
+        for (const p of withItems) {
+          const nm = (withItems.length > 1 ? `${base} · ${p.name}` : base).slice(0, 30);
+          const nid = addPage(nm, after); after = nid; first = first || nid;
+          act(() => { for (const it of byPage.get(p.id)) addItem({ ...it, id: uid(), page: nid }); });
+        }
+        setPage(first); requestAnimationFrame(fitContent);
       } catch (e) { toast('Не удалось открыть: ' + e.message, 4000); }
     };
     inp.click();
@@ -2254,12 +2474,22 @@ function startBoard(room) {
     if (side === 'right') { // слева от кнопки
       p.style.left = Math.max(8, r.left - 8 - pr.width) + 'px';
       p.style.top = clamp(r.top, 8, H - pr.height - 8) + 'px';
+    } else if (side === 'left') { // справа от кнопки
+      p.style.left = Math.min(W - pr.width - 8, r.right + 8) + 'px';
+      p.style.top = clamp(r.top, 8, H - pr.height - 8) + 'px';
     } else {
       p.style.top = (side === 'bottom' ? Math.max(8, r.top - 8 - pr.height) : r.bottom + 8) + 'px';
       p.style.left = clamp(align === 'right' ? r.right - pr.width : r.left, 8, W - pr.width - 8) + 'px';
     }
     p.addEventListener('pointerdown', (e) => e.stopPropagation());
-    setTimeout(() => document.addEventListener('pointerdown', function h(e) { if (!p.contains(e.target)) { p.remove(); popovers.delete(p); document.removeEventListener('pointerdown', h, true); } }, true), 0);
+    setTimeout(() => document.addEventListener('pointerdown', function h(e) {
+      if (!document.body.contains(p)) { document.removeEventListener('pointerdown', h, true); return; }
+      if (p.contains(e.target)) return;
+      // щелчок по кнопке, у которой открыто это окно, его не закрывает (окно закрывается, когда уводишь курсор)
+      if (p.dataset.grp && e.target.closest && e.target.closest(`[data-grp="${p.dataset.grp}"]`)) return;
+      p.remove(); popovers.delete(p); if (groupPop && groupPop.el === p) closeGroupPop();
+      document.removeEventListener('pointerdown', h, true);
+    }, true), 0);
     return p;
   }
 
@@ -2271,7 +2501,7 @@ function startBoard(room) {
         ['Стереометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'solid')]] },
     more: { tools: ['note', 'image'], name: 'Ещё', sections: [['', ['note', 'image']]] },
   };
-  const BAR = ['select', 'hand', 'pen', 'dpen', 'hl', 'eraser', '|', '@shapes', '|', 'text', 'tex', 'graph', '@more'];
+  const BAR = ['select', 'hand', 'pen', 'eraser', 'hl', 'dpen', '|', '@shapes', '|', 'text', 'tex', 'graph', '@more'];
   const toolDef = (id) => TOOLS.find((t) => t.id === id);
   function toolIcon(id) {
     if (id === 'select' && prefs.lasso) return 'lasso';
@@ -2282,18 +2512,20 @@ function startBoard(room) {
   const HOVER_MS = 120; // сколько держать курсор на кнопке, чтобы раскрылся список
   let hoverTimer = 0, groupPop = null;
   function cancelGroupClose() {}
+  const popOpen = (gname) => !!(groupPop && groupPop.gname === gname && document.body.contains(groupPop.el));
   // Выпадающее окно у кнопки: курсор ушёл с кнопки и с окна — окно сразу исчезает.
   // Между кнопкой и окном — невидимый «мостик», чтобы по дороге вниз окно не закрылось.
   function hoverPop(pop, anchor, gname) {
     const r = anchor.getBoundingClientRect(), pr = pop.getBoundingClientRect();
     let bx, by, bw, bh;
-    if (pr.right <= r.left + 1) { bx = pr.right - 2; bw = r.left - pr.right + 4; by = Math.min(r.top, pr.top); bh = Math.max(r.bottom, pr.bottom) - by; } // окно слева
+    if (pr.left >= r.right - 1) { bx = r.right - 2; bw = pr.left - r.right + 4; by = Math.min(r.top, pr.top); bh = Math.max(r.bottom, pr.bottom) - by; } // окно справа
+    else if (pr.right <= r.left + 1) { bx = pr.right - 2; bw = r.left - pr.right + 4; by = Math.min(r.top, pr.top); bh = Math.max(r.bottom, pr.bottom) - by; } // окно слева
     else if (pr.bottom <= r.top + 1) { by = pr.bottom - 2; bh = r.top - pr.bottom + 4; bx = Math.min(r.left, pr.left); bw = Math.max(r.right, pr.right) - bx; } // окно сверху
     else { by = r.bottom - 2; bh = Math.max(4, pr.top - r.bottom + 4); bx = Math.min(r.left, pr.left); bw = Math.max(r.right, pr.right) - bx; } // окно снизу
     const bridge = el('div', { class: 'pop-bridge', style: `left:${bx}px;top:${by}px;width:${Math.max(4, bw)}px;height:${Math.max(4, bh)}px` });
     document.body.append(bridge); popovers.add(bridge);
     const gp = { gname, el: pop, bridge };
-    groupPop = gp;
+    groupPop = gp; pop.dataset.grp = gname;
     pop.addEventListener('pointerleave', scheduleGroupClose);
     bridge.addEventListener('pointerleave', scheduleGroupClose);
     return gp;
@@ -2325,14 +2557,15 @@ function startBoard(room) {
         // Список открывается сам, если задержать курсор на кнопке (полоска внизу показывает отсчёт)
         btn.style.setProperty('--hover-ms', HOVER_MS + 'ms');
         btn.addEventListener('pointerenter', (e) => {
-          if (e.pointerType === 'touch' || groupPop?.gname === gname) { cancelGroupClose(); return; }
+          if (e.pointerType === 'touch' || popOpen(gname)) return;
           clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { btn.classList.remove('hovering'); openGroup(); }, HOVER_MS);
         });
         btn.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); btn.classList.remove('hovering'); scheduleGroupClose(e); });
+        // щелчок: выбрать (если это фигуры) и оставить окно открытым — закроется, когда уведёте курсор
         btn.onclick = () => {
           clearTimeout(hoverTimer); btn.classList.remove('hovering');
-          if (gname === 'shapes' && !active) { setTool(last); return; }
-          openGroup();
+          if (gname === 'shapes' && !active) setTool(last);
+          if (!popOpen(gname)) openGroup();
         };
         const openGroup = () => {
           cancelGroupClose();
@@ -2349,6 +2582,7 @@ function startBoard(room) {
                 return bb;
               })),
             ]).flat(),
+            gname === 'shapes' ? shapeSizeRow() : null,
           ]);
           hoverPop(pop, btn, gname);
         };
@@ -2359,11 +2593,15 @@ function startBoard(room) {
       const tb = el('button', {
         class: 'tbtn' + (S.tool === t.id ? ' on' : ''), title: `${t.name} (${t.key})`, 'data-grp': 'size:' + t.id,
         // повторный щелчок по выбранному перу/ластику/тексту — открыть толщину
-        onclick: () => { clearTimeout(hoverTimer); if (SIZE_OF[t.id] && S.tool === t.id) { if (groupPop?.gname !== 'size:' + t.id) openSizePop(t.id, tb); } else setTool(t.id); },
+        onclick: () => {
+          clearTimeout(hoverTimer);
+          if (S.tool !== t.id || !SIZE_OF[t.id]) setTool(t.id); // V ещё раз — лассо, как раньше
+          if (SIZE_OF[t.id] && !popOpen('size:' + t.id)) { const nb = toolbar.querySelector(`[data-grp="size:${t.id}"]`) || tb; openSizePop(t.id, nb); }
+        },
       }, icon(toolIcon(t.id)), el('span', { class: 'key' }, t.key));
       if (SIZE_OF[t.id]) {
         tb.addEventListener('pointerenter', (e) => {
-          if (e.pointerType === 'touch' || groupPop?.gname === 'size:' + t.id) { cancelGroupClose(); return; }
+          if (e.pointerType === 'touch' || popOpen('size:' + t.id)) return;
           clearTimeout(hoverTimer); hoverTimer = setTimeout(() => openSizePop(t.id, tb), HOVER_MS);
         });
         tb.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); scheduleGroupClose(e); });
@@ -2372,7 +2610,18 @@ function startBoard(room) {
     }
     toolbar.append(el('div', { class: 'sep' }));
     const cur = currentColor();
-    toolbar.append(el('div', { class: 'colors' }, COLORS.map((c, i) => el('button', { class: 'cbtn' + (c === cur ? ' on' : ''), title: `${COLOR_NAMES[i]} — ${i + 1}`, style: `--c:${c}`, onclick: () => setColor(c) }))));
+    const colorBtns = () => COLORS.map((c, i) => el('button', { class: 'cbtn' + (c === cur ? ' on' : ''), title: `${COLOR_NAMES[i]} — ${i + 1}`, style: `--c:${c}`, onclick: () => { setColor(c); } }));
+    const vert = ['left', 'right'].includes(prefs.barPos);
+    if (!vert) toolbar.append(el('div', { class: 'colors' }, colorBtns()));
+    else {
+      // сбоку цвета не занимают полпанели: одна кнопка текущего цвета, палитра — при наведении
+      const cb = el('button', { class: 'tbtn cur-color', 'data-grp': 'colors', title: 'Цвет (1–8)' }, el('span', { class: 'swatch', style: `--c:${cur}` }));
+      const openColors = () => { const pop = popover(cb, [el('div', { class: 'palette' }, colorBtns())]); pop.classList.add('pal-pop'); hoverPop(pop, cb, 'colors'); };
+      cb.addEventListener('pointerenter', (e) => { if (e.pointerType === 'touch' || popOpen('colors')) return; clearTimeout(hoverTimer); hoverTimer = setTimeout(openColors, HOVER_MS); });
+      cb.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); scheduleGroupClose(e); });
+      cb.onclick = () => { clearTimeout(hoverTimer); if (!popOpen('colors')) openColors(); };
+      toolbar.append(cb);
+    }
     toolbar.append(el('div', { class: 'sep' }));
     toolbar.append(el('div', { class: 'ur' },
       el('button', { class: 'tbtn', title: 'Отменить своё действие — Ctrl+Z', onclick: doUndo }, icon('undo')),
@@ -2431,23 +2680,20 @@ function startBoard(room) {
       item('Картинку или PDF…', () => pickFile(toWorld(W / 2 - 200, H / 4)), 'I, Ctrl+V'),
       el('div', { class: 'mh' }, 'Сохранить'),
       item('Урок в файл (.doska)', exportLesson, 'Ctrl+S'),
-      item('Открыть урок из файла…', importLesson, 'Ctrl+O'),
+      item('Урок из файла — на новый лист…', importLesson, 'Ctrl+O'),
       item('Лист картинкой (PNG)', exportPng),
       item('Все листы в PDF', exportPdf),
       el('div', { class: 'mh' }, 'Лист'),
       item('Показать всё на листе', fitContent, 'Shift+1'),
       item('Удалить этот лист', () => deletePage(S.page)),
       el('div', { class: 'mh' }, 'Панель инструментов'),
-      el('div', { class: 'row' }, ...[['top', 'Сверху'], ['bottom', 'Снизу'], ['right', 'Справа']].map(([id, label]) =>
+      el('div', { class: 'row' }, ...[['top', 'Сверху'], ['bottom', 'Снизу'], ['left', 'Слева'], ['right', 'Справа']].map(([id, label]) =>
         el('button', { class: 'chip' + ((prefs.barPos || 'top') === id ? ' on' : ''), onclick: () => { prefs.barPos = id; savePrefs(); closePopovers(); renderToolbar(); invalidate(false); } }, label))),
       el('div', { class: 'mh' }, 'Прочее'),
-      item((prefs.peerCursor ? 'Скрыть' : 'Показывать') + ' курсор собеседника', togglePeerCursor, 'Shift+C'),
       item('Настройки пера и мыши…', showSettings),
       item('Горячие клавиши и подсказки', showHelp, '?'),
-      item('Полный экран', toggleFullscreen, 'F11'),
     ]);
   }
-  function togglePeerCursor() { prefs.peerCursor = !prefs.peerCursor; savePrefs(); invalidate(false); }
   function toggleFullscreen() {
     if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => toast('Браузер не разрешил полный экран — нажмите F11'));
   }
@@ -2466,7 +2712,7 @@ function startBoard(room) {
     if (!l) { showConnect(); return; }
     navigator.clipboard.writeText(l).then(() => toast('Ссылка скопирована'), () => uiDialog({ title: 'Ссылка на доску', text: 'Скопируйте вручную: выделите и нажмите Ctrl+C.', readonlyText: l, ok: 'Закрыть', cancel: null }));
   } }, icon('link'));
-  topRight.append(statusBtn, shareBtn, followBtn, summonBtn, fsBtn, el('div', { class: 'sep' }), exitBtn);
+  topRight.append(statusBtn, shareBtn, followBtn, fsBtn, el('div', { class: 'sep' }), exitBtn);
   // Новая версия на сайте: тихо проверяем раз в несколько минут и при возврате на вкладку
   if (location.protocol.startsWith('http')) {
     let shown = false;
@@ -2505,15 +2751,15 @@ function startBoard(room) {
   // Панель: сверху (по умолчанию), снизу или справа — выбирается в меню
   function layoutBars() {
     const pos = prefs.barPos || 'top';
-    toolbar.classList.toggle('vert', pos === 'right');
+    toolbar.classList.toggle('vert', pos === 'right' || pos === 'left');
     document.body.dataset.bar = pos;
     toolbar.style.right = ''; toolbar.style.bottom = '';
     let bottomUsed = 0;
-    if (pos === 'right') {
+    if (pos === 'right' || pos === 'left') {
       const top = 62, avail = H - top - 10; // масштаб уходит левее панели, панель может занять всю высоту
       toolbar.style.maxHeight = avail + 'px';
       const th = toolbar.offsetHeight;
-      toolbar.style.left = W - toolbar.offsetWidth - 10 + 'px';
+      toolbar.style.left = (pos === 'right' ? W - toolbar.offsetWidth - 10 : 10) + 'px';
       toolbar.style.top = Math.round(top + Math.max(0, (avail - th) / 2)) + 'px';
       toasts.style.top = '62px';
     } else {
@@ -2534,7 +2780,7 @@ function startBoard(room) {
     const tb = toolbar.getBoundingClientRect();
     const zoomHit = pos === 'bottom' && tb.right > W - 150;
     document.body.style.setProperty('--bar-bottom', (pos === 'bottom' ? bottomUsed + 8 : 12) + 'px');
-    document.body.style.setProperty('--zoom-bottom', (zoomHit ? bottomUsed + 8 : 10) + 'px');
+    document.body.style.setProperty('--zoom-bottom', (zoomHit ? bottomUsed + 8 : 28) + 'px');
     document.body.style.setProperty('--zoom-right', (pos === 'right' ? W - tb.left + 8 : 10) + 'px');
   }
   new ResizeObserver(layoutBars).observe(document.body);
@@ -2678,7 +2924,6 @@ function startBoard(room) {
       ['Закрепить / открепить', 'Shift+L'],
       ['Выделить закреплённое', 'Alt+клик'],
       ['Выделить и перенести, не меняя перо', 'удерживать перо на месте; щелчок по пустому — снова перо'],
-      ['Курсор собеседника: показать / скрыть', 'Shift+C'],
       ['Изменить текст/формулу/график', 'двойной клик или Enter'],
       ['Двигать доску', 'Пробел+тянуть, правая или средняя кнопка, кнопка пера'],
       ['Быстрое меню (инструменты и цвета)', 'правый щелчок или кнопка пера по пустому месту'],
@@ -2716,7 +2961,7 @@ function startBoard(room) {
     renderPages(); invalidate();
     hub.startTabs(room);
     if (!/[?&]nopeer\b/.test(location.search)) hub.startPeer(room);
-    window.__doska = { STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo }; window.__MC = ManualConnect;
+    window.__doska = { solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo }; window.__MC = ManualConnect;
   };
   idb.whenSynced.then(start);
   setTimeout(start, 3000); // если IndexedDB недоступна — всё равно запускаемся

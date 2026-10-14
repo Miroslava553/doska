@@ -287,10 +287,19 @@ kbd { font: 12px ui-monospace, Consolas, monospace; background: #f3f4f6; border:
 
 /* панель инструментов: цвета и отмена — группами, чтобы панель можно было поставить вертикально */
 .colors, .ur { display: flex; align-items: center; gap: 2px; flex: none; }
-.toolbar.vert { flex-direction: column; overflow-x: hidden; overflow-y: auto; padding: 4px; }
-.toolbar.vert .sep { width: auto; height: 1px; align-self: stretch; margin: 4px 4px; }
-.toolbar.vert .colors { display: grid; grid-template-columns: repeat(2, 24px); gap: 5px; padding: 4px 2px; justify-content: center; }
-.toolbar.vert .cbtn { margin: 0; }
-.toolbar.vert .ur { flex-direction: column; }
-.toolbar.vert .tbtn { height: 34px; }
-.toolbar.vert .colors { gap: 4px; padding: 3px 2px; }
+/* сбоку: широкие кнопки во всю ширину (легко попасть пером), отмена и возврат в одну строку */
+.toolbar.vert { flex-direction: column; align-items: stretch; overflow-x: hidden; overflow-y: auto; padding: 5px; gap: 3px; width: 104px; }
+.toolbar.vert .tbtn { width: auto; height: 44px; border-radius: 10px; }
+.toolbar.vert .tbtn .ic, .toolbar.vert .tbtn .ic svg { width: 24px !important; height: 24px !important; }
+.toolbar.vert .tbtn .key { right: 8px; bottom: 4px; font-size: 10px; display: block; }
+.toolbar.vert .tbtn.grp .tri { right: 5px; bottom: 5px; }
+.toolbar.vert .sep { width: auto; height: 1px; align-self: stretch; margin: 3px 6px; }
+.toolbar.vert .ur { gap: 3px; }
+.toolbar.vert .ur .tbtn { flex: 1; }
+.cur-color .swatch { width: 26px; height: 26px; border-radius: 50%; background: var(--c); box-shadow: 0 0 0 2px #fff, 0 0 0 3px #d1d5db; }
+.pal-pop { padding: 10px; min-width: 0; }
+.palette { display: grid; grid-template-columns: repeat(4, 34px); gap: 8px; }
+.palette .cbtn { width: 34px; height: 34px; margin: 0; }
+.shape-size { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); margin-top: 6px; padding: 10px 8px 4px; }
+.shape-size .ic, .shape-size .ic svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
+.shape-size .sz-row { flex: 1; margin: 0; }

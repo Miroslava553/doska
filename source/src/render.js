@@ -2,6 +2,7 @@
 import { getStroke } from 'perfect-freehand';
 import { compileMany } from './expr.js';
 import { figSegments, drawFig, FIGS, figPrims } from './figs.js';
+import { SOLID_KINDS, solidView } from './solid.js';
 
 export const FONT = '"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
 export const GRID = 40; // клетка в мировых единицах
@@ -160,8 +161,19 @@ function wrap(text, maxW, font) {
 }
 
 // ---------- рамки ----------
+// Поворот на доске для эллипса и плоских фигур без вершин (вписанная/описанная окружность, оси): поле rot, градусы, вокруг центра
+export const rotOf = (it) => ((it.type === 'ellipse' || (it.type === 'fig' && !SOLID_KINDS.has(it.kind))) && it.rot ? it.rot : 0);
+export function rotPt(it, x, y, sign = 1) {
+  const a = (rotOf(it) * Math.PI / 180) * sign, cx = it.w / 2, cy = it.h / 2, c = Math.cos(a), s = Math.sin(a);
+  return [cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c];
+}
+function rotBox(it, b) {
+  const P = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]].map(([x, y]) => rotPt(it, x, y));
+  return [Math.min(...P.map((q) => q[0])), Math.min(...P.map((q) => q[1])), Math.max(...P.map((q) => q[0])), Math.max(...P.map((q) => q[1]))];
+}
 export function localBox(it) {
   if (it._lb) return it._lb;
+  if (rotOf(it)) { const { rot, ...plain } = it; it._lb = rotBox(it, localBox(plain)); return it._lb; }
   let b;
   switch (it.type) {
     case 'stroke': {
@@ -200,7 +212,7 @@ export function geomWorldBox(it) {
   else if (it.type === 'poly') b = mm(it.pts);
   else if (it.type === 'line' || it.type === 'arrow') b = mm([[it.x1, it.y1], [it.x2, it.y2]]);
   else b = localBox(it).slice();
-  if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'fig') b = [0, 0, it.w, it.h];
+  if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'fig') b = rotOf(it) ? rotBox(it, [0, 0, it.w, it.h]) : [0, 0, it.w, it.h];
   const s = it.s || 1;
   return [it.x + b[0] * s, it.y + b[1] * s, it.x + b[2] * s, it.y + b[3] * s];
 }
@@ -232,6 +244,7 @@ export function hitItem(it, wx, wy, tol) {
   const s = it.s || 1; const px = (wx - (it.x || 0)) / s, py = (wy - (it.y || 0)) / s; const t = tol / s;
   const [a, b, c, d] = localBox(it);
   if (px < a - t || py < b - t || px > c + t || py > d + t) return false;
+  if (rotOf(it)) { const { rot, _lb, ...plain } = it; const [qx, qy] = rotPt(it, px, py, -1); return hitItem(plain, (it.x || 0) + qx * s, (it.y || 0) + qy * s, tol); }
   switch (it.type) {
     case 'stroke': {
       const p = decodePts(it); const r = t + it.size / 2;
@@ -343,6 +356,19 @@ function drawGraph(ctx, it, scale) {
   ctx.strokeStyle = '#ced4da'; ctx.lineWidth = 1 / scale; ctx.strokeRect(0, 0, w, h);
 }
 
+// значок прямого угла у вершины, где угол 90° (±1,5°)
+function rightMark(ctx, it) {
+  const P = it.pts;
+  for (let i = 0; i < 3; i++) {
+    const v = P[i], a = P[(i + 2) % 3], b = P[(i + 1) % 3];
+    const ux = a[0] - v[0], uy = a[1] - v[1], wx = b[0] - v[0], wy = b[1] - v[1];
+    const la = Math.hypot(ux, uy), lb = Math.hypot(wx, wy); if (!la || !lb) continue;
+    if (Math.abs((ux * wx + uy * wy) / (la * lb)) > 0.026) continue;
+    const m = Math.min(la, lb) * 0.12, e1 = [ux / la * m, uy / la * m], e2 = [wx / lb * m, wy / lb * m];
+    ctx.lineWidth = Math.max(1, it.size * 0.7); ctx.beginPath();
+    ctx.moveTo(v[0] + e1[0], v[1] + e1[1]); ctx.lineTo(v[0] + e1[0] + e2[0], v[1] + e1[1] + e2[1]); ctx.lineTo(v[0] + e2[0], v[1] + e2[1]); ctx.stroke();
+  }
+}
 function arrowHead(ctx, x1, y1, x2, y2, size) {
   const a = Math.atan2(y2 - y1, x2 - x1); const L = Math.max(10, size * 4);
   ctx.beginPath();
@@ -366,7 +392,9 @@ export function shapePolys(it) {
     add(ell(it.w / 2, it.h / 2, Math.abs(it.w / 2), Math.abs(it.h / 2), 0, Math.PI * 2), it.dash);
     if (it.center) add([[it.w / 2, it.h / 2], [it.w / 2, it.h / 2]], false, 2 * Math.max(2, it.size));
   } else if (it.type === 'poly') add(it.closed ? [...it.pts, it.pts[0]] : it.pts, it.dash);
-  else if (it.type === 'fig') {
+  else if (it.type === 'fig' && SOLID_KINDS.has(it.kind)) {
+    for (const l of solidView(it).lines) add(l.pts, l.d && 'fig');
+  } else if (it.type === 'fig') {
     const f = FIGS[it.kind]; const { w, h } = it; if (!f) return { polys: P, texts: T };
     for (const p of figPrims(it)) {
       if (p.t === 'l' || p.t === 'ar') {
@@ -377,6 +405,10 @@ export function shapePolys(it) {
       else if (p.t === 'txt') T.push({ x: p.a[0] * w, y: p.a[1] * h, s: p.s, fs: Math.max(12, Math.min(w, h) * 0.07) });
     }
     if (f.right) { const m = Math.min(w, h) * 0.1; add([[0, h - m], [m, h - m], [m, h]], false, Math.max(1, it.size * 0.7)); }
+  }
+  if (rotOf(it)) {
+    for (const pc of P) pc.pts = pc.pts.map(([x, y, p]) => [...rotPt(it, x, y), p]);
+    for (const t of T) [t.x, t.y] = rotPt(it, t.x, t.y);
   }
   return { polys: P, texts: T };
 }
@@ -400,6 +432,7 @@ export function drawItem(ctx, it, ov, scale, pieces) {
   ctx.strokeStyle = it.color; ctx.fillStyle = it.color;
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   if (pieces && it.type !== 'stroke') { drawPieces(ctx, it, pieces); ctx.restore(); return; }
+  if (rotOf(it)) { ctx.translate(it.w / 2, it.h / 2); ctx.rotate(rotOf(it) * Math.PI / 180); ctx.translate(-it.w / 2, -it.h / 2); }
   switch (it.type) {
     case 'stroke': {
       if (it.kind === 'hl') { ctx.globalAlpha = 0.38; }
@@ -431,6 +464,7 @@ export function drawItem(ctx, it, ov, scale, pieces) {
       ctx.beginPath(); it.pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); if (it.closed) ctx.closePath();
       if (it.fill && it.closed) { ctx.globalAlpha = 0.22; ctx.fill(); ctx.globalAlpha = 1; }
       ctx.stroke(); ctx.setLineDash([]);
+      if (it.fk === 'rtriangle' && it.closed && it.pts.length === 3) rightMark(ctx, it);
       break;
     }
     case 'text': {

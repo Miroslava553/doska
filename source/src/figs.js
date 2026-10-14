@@ -1,3 +1,4 @@
+import { SOLID_KINDS, solidView, drawSolid, solidAspect } from './solid.js';
 // Готовые фигуры в единичном квадрате [0..1]×[0..1] (y вниз). d — пунктир (невидимое ребро).
 const L = (x1, y1, x2, y2, d = false) => ({ t: 'l', a: [x1, y1, x2, y2], d });
 const E = (cx, cy, rx, ry, a0 = 0, a1 = Math.PI * 2, d = false) => ({ t: 'e', a: [cx, cy, rx, ry, a0, a1], d });
@@ -75,6 +76,7 @@ export const FIGS = {
 export function figPrims(it) { const f = FIGS[it.kind]; if (!f) return []; return (f.make && f.make(it)) || f.prims; }
 export function figSegments(it) {
   const f = FIGS[it.kind]; if (!f) return [];
+  if (SOLID_KINDS.has(it.kind)) { const segs = []; for (const l of solidView(it).lines) for (let i = 1; i < l.pts.length; i++) segs.push([...l.pts[i - 1], ...l.pts[i]]); return segs; }
   const { w, h } = it;
   const segs = [];
   for (const p of figPrims(it)) {
@@ -92,6 +94,7 @@ export function figSegments(it) {
 
 export function drawFig(ctx, it) {
   const f = FIGS[it.kind]; if (!f) return;
+  if (SOLID_KINDS.has(it.kind)) { drawSolid(ctx, it); return; } // стереометрия — по трёхмерной модели
   const { w, h } = it;
   const dash = [Math.max(4, it.size * 3), Math.max(3, it.size * 2.5)];
   ctx.lineWidth = it.size;
@@ -138,3 +141,5 @@ export function figIcon(kind) {
   }
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">${s}</svg>`;
 }
+
+for (const k of SOLID_KINDS) if (FIGS[k]) FIGS[k].aspect = solidAspect(k);
