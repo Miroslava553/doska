@@ -1,7 +1,7 @@
 // Геометрия и рисование объектов доски.
 import { getStroke } from 'perfect-freehand';
 import { compileMany } from './expr.js';
-import { figSegments, drawFig, FIGS } from './figs.js';
+import { figSegments, drawFig, FIGS, figPrims } from './figs.js';
 
 export const FONT = '"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
 export const GRID = 40; // клетка в мировых единицах
@@ -241,7 +241,7 @@ export function hitItem(it, wx, wy, tol) {
     }
     case 'line': case 'arrow': return distSeg(px, py, it.x1, it.y1, it.x2, it.y2) <= t + it.size / 2 + 2;
     case 'fig': {
-      if (!it._segs) it._segs = figSegments(it.kind, it.w, it.h);
+      if (!it._segs) it._segs = figSegments(it);
       const r = t + it.size / 2 + 2;
       return it._segs.some((q) => distSeg(px, py, q[0], q[1], q[2], q[3]) <= r);
     }
@@ -368,7 +368,7 @@ export function shapePolys(it) {
   } else if (it.type === 'poly') add(it.closed ? [...it.pts, it.pts[0]] : it.pts, it.dash);
   else if (it.type === 'fig') {
     const f = FIGS[it.kind]; const { w, h } = it; if (!f) return { polys: P, texts: T };
-    for (const p of f.prims) {
+    for (const p of figPrims(it)) {
       if (p.t === 'l' || p.t === 'ar') {
         const [x1, y1, x2, y2] = [p.a[0] * w, p.a[1] * h, p.a[2] * w, p.a[3] * h];
         add([[x1, y1], [x2, y2]], p.d && 'fig');

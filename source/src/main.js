@@ -56,7 +56,6 @@ const SIZE_CFG = {
 };
 const OLD_SIZES = { pen: [2, 3.5, 6], hl: [12, 20, 32], eraser: [12, 28, 56], text: [20, 28, 40] };
 const LINE_TOOLS = new Set(['line', 'dline', 'arrow']);
-const BASIC_SHAPES = new Set(['rect', 'ellipse', 'circle']);
 const TOOLS = [
   { id: 'select', key: 'V', name: 'Выделение', hint: 'V ещё раз — лассо' },
   { id: 'hand', key: 'H', name: 'Рука', hint: 'или удерживайте Пробел' },
@@ -488,8 +487,8 @@ function startBoard(room) {
       }
     }
     if (g && g.drawScreen) g.drawScreen(octx);
-    // чужие курсоры
-    for (const [id, c] of remoteCursors) {
+    // чужие курсоры — только если включено в меню (по умолчанию скрыты)
+    if (prefs.peerCursor) for (const [id, c] of remoteCursors) {
       if (c.page !== S.page) continue;
       if (Date.now() - c.at > 15000) { remoteCursors.delete(id); continue; }
       const [sx, sy] = toScreen(c.x, c.y);
@@ -970,9 +969,10 @@ function startBoard(room) {
     if (g.prevId) { S.hidden.add(g.prevId); STATS.rejoin = (STATS.rejoin || 0) + 1; }
     liveSend(g, sb.keys);
     g.move = (p, ev) => {
-      if (ev && ev.shiftKey) { sb.straight(p[0], p[1]); return; }
+      if (ev && ev.shiftKey) { stopHold(); sb.straight(p[0], p[1]); return; }
       if (sb.straightLine) sb.unstraight();
       const f = sb.add(p[0], p[1], p[2], (ev && ev.timeStamp) || performance.now());
+      if (!sb.isDot) stopHold();
       if (f) liveSend(g, [f]);
     };
     g.drawOver = (c) => {
@@ -985,7 +985,22 @@ function startBoard(room) {
     g.finalPoint = (p) => { if (kind !== 'dash') sb.end(p[0], p[1]); };
     g.inkTrail = () => (!sb.isDot && !sb.straightLine && kind === 'pen' ? { color: g.color, size: g.size, thin: g.thin, p: sb.lastPressure() } : null);
     g.dbg = () => { const geo = sb.geometry(); return { body: geo[geo.length - 1], tip: sb.tip, raw: sb.raw, inSlop: sb.isDot }; };
+    // Удержание: перо прижато и почти не двигается HOLD_MS — вместо точки включается выделение
+    // (объект под пером сразу берётся и тянется, на пустом месте — рамка). Короткий щелчок по пустому — снова перо.
+    const holdTool = S.tool;
+    let holdTimer = setTimeout(() => {
+      holdTimer = 0;
+      if (gesture !== g || !sb.isDot) return;
+      g.cancel();
+      setTool('select', { noToggle: true });
+      const sg = selectGesture(pt, { shiftKey: false, altKey: false });
+      S.autoBack = '*'; S.autoBackTool = holdTool;
+      if (sg) { sg.pid = g.pid; sg.touch = g.touch; gesture = sg; } else gesture = null;
+      updateCursor(); invalidate();
+    }, HOLD_MS);
+    const stopHold = () => { if (holdTimer) { clearTimeout(holdTimer); holdTimer = 0; } };
     g.end = () => {
+      stopHold();
       const pts = kind === 'dash' && !sb.isDot && !sb.straightLine ? sb.live(false).map((q) => q.slice(0, 3)) : sb.final(); // пунктир — как на экране, без пересглаживания
       let x0 = Infinity, y0 = Infinity;
       for (const q of pts) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); }
@@ -1000,9 +1015,10 @@ function startBoard(room) {
       lastInk = { id, t: performance.now(), kind, color: g.color, size: g.size, keys: sb.keys, end: sb.isDot ? [sb.start[0], sb.start[1]] : [sb.raw[0], sb.raw[1]] };
       hub.broadcast({ t: 'liveEnd', sid: g.sid });
     };
-    g.cancel = () => { if (g.prevId) S.hidden.delete(g.prevId); hub.broadcast({ t: 'liveEnd', sid: g.sid }); };
+    g.cancel = () => { stopHold(); if (g.prevId) S.hidden.delete(g.prevId); hub.broadcast({ t: 'liveEnd', sid: g.sid }); };
     return g;
   }
+  const HOLD_MS = 550;
 
   // ластик: целиком (по умолчанию) или точный (разрезает штрихи)
   // Ластик: целиком (по умолчанию) или точный — режет и линии, и фигуры ровно по своему кругу.
@@ -1174,12 +1190,12 @@ function startBoard(room) {
       },
       end() {
         // щелчок по пустому месту в основной фигуре — к ручке (фигуры из списка ставятся щелчком)
-        if (clickOnly() && !isFig) { setTool(prefs.lastInk || 'pen', { noToggle: true }); return; }
+        if (clickOnly() && !isFig) { setTool('pen', { noToggle: true }); return; }
         const id = uid();
         act(() => addItem({ id, page: S.page, z: zTop(S.page), s: 1, color, size, ...geom() }));
         // линии и стрелки обычно рисуют подряд — инструмент остаётся
         // основные фигуры: выделение → щелчок по пустому → снова эта фигура → ещё щелчок → ручка
-        if (!LINE_TOOLS.has(tool)) selectNew(id, BASIC_SHAPES.has(tool) ? tool : null);
+        if (!LINE_TOOLS.has(tool)) selectNew(id); // выделение → щелчок по пустому месту → ручка
       },
     };
     return g;
@@ -1273,10 +1289,11 @@ function startBoard(room) {
     lastClick = { t: now, id: hit ? hit.id : null };
     const bb = S.sel.size ? selectionBox() : null;
     const inSel = bb && pt[0] >= bb[0] && pt[0] <= bb[2] && pt[1] >= bb[1] && pt[1] <= bb[3];
-    if (hit && hit.id !== S.autoBack) S.autoBack = null;
-    // выделение включилось само (после новой фигуры) — щелчок по пустому месту возвращает к ручке
-    if (!hit && !inSel && !e.shiftKey && S.autoBack && (!S.sel.size || S.sel.has(S.autoBack))) {
-      S.sel.clear(); setTool(S.autoBackTool || prefs.lastInk || 'pen', { noToggle: true }); return null;
+    // S.autoBack: id новой фигуры (выделение включилось само) или '*' (выделение на время — после удержания пера)
+    if (hit && S.autoBack !== '*' && hit.id !== S.autoBack) S.autoBack = null;
+    // щелчок по пустому месту возвращает к ручке
+    if (!hit && !inSel && !e.shiftKey && S.autoBack && (S.autoBack === '*' || !S.sel.size || S.sel.has(S.autoBack))) {
+      S.sel.clear(); setTool(S.autoBackTool || 'pen', { noToggle: true }); return null;
     }
     if (hit || (inSel && !e.shiftKey)) {
       if (hit) {
@@ -1647,7 +1664,7 @@ function startBoard(room) {
     const its = [...S.sel].map((id) => items.get(id)).filter(Boolean);
     if (!its.length || editorOpen) { selBar.hidden = true; selBar.dataset.key = ''; return; }
     const key = its.map((i) => `${i.id}${i.locked}${i.fill}${i.dash}${i.kind}${i.w}${i.h}${i.pts ? i.pts.length + ':' + i.pts[0] : ''}`).join('|');
-    if (selBar.dataset.key === key && !selBar.hidden) { selBar._sync?.(); placeSelBar(); return; } // ничего не поменялось — не трогаем (не мигает)
+    if ((selBar.dataset.key === key || selBar._dragging) && !selBar.hidden) { selBar._sync?.(); placeSelBar(); return; } // ничего не поменялось — не трогаем (не мигает)
     selBar.dataset.key = key; selBar.innerHTML = '';
     selBar._sync = null;
     const sk = selSizeKind(its);
@@ -1657,9 +1674,28 @@ function startBoard(room) {
       const row = sizeRow(sk.k, cur, (v) => setSize(sk.k, v, true, true), true);
       // «по умолчанию» — как у ручки (у текста — как у инструмента «Текст»)
       const def = el('button', { class: 'ibtn sq', title: sk.k === 'text' ? 'Размер по умолчанию' : 'Толщина по умолчанию — как у ручки', onclick: (e) => { e.stopPropagation(); setSize(sk.k, sz(sk.k), true, true); } }, el('span', { class: 'ic', html: ICONS.reset }));
-      selBar.append(el('div', { class: 'isize', title: cfg.name }, row.el), def);
+      selBar.append(el('div', { class: 'isize', title: cfg.name }, el('span', { class: 'ic', html: ICONS[sk.k === 'text' ? 'text' : 'sizeLine'] }), row.el), def);
       selBar._sync = () => { row.paint(); def.disabled = Math.abs(cur() - sz(sk.k)) < 1e-6; };
       selBar._sync();
+      selBar.append(el('div', { class: 'isep' }));
+    }
+    // угол фигуры (треугольники, параллелограмм, трапеция, ромб)
+    const one = its.length === 1 ? its[0] : null;
+    const angDef = one && one.type === 'fig' && !one.locked ? FIGS[one.kind]?.angle : null;
+    if (angDef) {
+      const cur = () => { const it = items.get(one.id); return it ? angDef.get(it) : 0; };
+      const val = el('span', { class: 'sz-val' });
+      const range = el('input', { type: 'range', class: 'sz-range', min: angDef.min, max: angDef.max, step: 1, value: Math.round(cur()) });
+      const paint = () => { if (!selBar._dragging) range.value = Math.round(cur()); val.textContent = Math.round(selBar._dragging ? +range.value : cur()) + '°'; };
+      const begin = () => { if (selBar._dragging) return; selBar._dragging = true; undo.stopCapturing(); undo.captureTimeout = 1e9; };
+      const finish = () => { if (!selBar._dragging) return; selBar._dragging = false; undo.captureTimeout = 0; undo.stopCapturing(); selBar.dataset.key = ''; updateSelBar(); };
+      range.addEventListener('pointerdown', begin); range.addEventListener('keydown', begin);
+      range.addEventListener('input', () => { begin(); const it = items.get(one.id); if (it) act(() => setFields(one.id, angDef.set(it, +range.value))); val.textContent = range.value + '°'; });
+      range.addEventListener('change', () => { finish(); range.blur(); });
+      range.addEventListener('pointerup', finish); range.addEventListener('blur', finish);
+      selBar.append(el('div', { class: 'isize', title: angDef.label }, el('span', { class: 'ic', html: ICONS.angle }), el('div', { class: 'sz-row' }, range, val)));
+      const prevSync = selBar._sync; selBar._sync = () => { prevSync?.(); paint(); };
+      paint();
       selBar.append(el('div', { class: 'isep' }));
     }
     const acts = selectionActions(its);
@@ -1930,6 +1966,7 @@ function startBoard(room) {
       if (k === 'f') { toggleFollow(); return; }
       if (k === 's') { summon(); return; }
       if (k === 'n') { addPage(); return; }
+      if (k === 'c') { togglePeerCursor(); return; }
       if (k === '1') { fitContent(); return; }
       return;
     }
@@ -2376,11 +2413,13 @@ function startBoard(room) {
       item('Показать всё на листе', fitContent, 'Shift+1'),
       item('Удалить этот лист', () => deletePage(S.page)),
       el('div', { class: 'mh' }, 'Прочее'),
+      item((prefs.peerCursor ? 'Скрыть' : 'Показывать') + ' курсор собеседника', togglePeerCursor, 'Shift+C'),
       item('Настройки пера и мыши…', showSettings),
       item('Горячие клавиши и подсказки', showHelp, '?'),
       item('Полный экран', toggleFullscreen, 'F11'),
     ]);
   }
+  function togglePeerCursor() { prefs.peerCursor = !prefs.peerCursor; savePrefs(); invalidate(false); }
   function toggleFullscreen() {
     if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => toast('Браузер не разрешил полный экран — нажмите F11'));
   }
@@ -2583,6 +2622,8 @@ function startBoard(room) {
       ['Выделить всё на листе', 'Ctrl+A'],
       ['Закрепить / открепить', 'Shift+L'],
       ['Выделить закреплённое', 'Alt+клик'],
+      ['Выделить и перенести, не меняя перо', 'удерживать перо на месте; щелчок по пустому — снова перо'],
+      ['Курсор собеседника: показать / скрыть', 'Shift+C'],
       ['Изменить текст/формулу/график', 'двойной клик или Enter'],
       ['Двигать доску', 'Пробел+тянуть, правая или средняя кнопка, кнопка пера'],
       ['Быстрое меню (инструменты и цвета)', 'правый щелчок или кнопка пера по пустому месту'],

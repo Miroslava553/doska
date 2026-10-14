@@ -37,6 +37,7 @@ export const ICONS = {
   trash: s('<path d="M4.5 7h15M9.5 7V5h5v2M6.5 7l1 13h9l1-13M10.5 11v6M13.5 11v6"/>'),
   poly: s('<path d="M4 18l3-12 9 2 4 9-9 3z"/><circle cx="4" cy="18" r="1.3" fill="currentColor"/><circle cx="7" cy="6" r="1.3" fill="currentColor"/><circle cx="16" cy="8" r="1.3" fill="currentColor"/><circle cx="20" cy="17" r="1.3" fill="currentColor"/><circle cx="11" cy="20" r="1.3" fill="currentColor"/>'),
   plus: s('<path d="M12 5v14M5 12h14"/>'),
+  angle: s('<path d="M4 19h16M4 19L15 6"/><path d="M10 19a6 6 0 00-1.8-4.3"/>'),
   link: s('<path d="M10 14a4 4 0 005.66 0l3-3a4 4 0 00-5.66-5.66l-1 1"/><path d="M14 10a4 4 0 00-5.66 0l-3 3a4 4 0 005.66 5.66l1-1"/>'),
   minus: s('<path d="M5 12h14"/>'),
   left: s('<path d="M15 18l-6-6 6-6"/>'),
