@@ -403,6 +403,9 @@ function startBoard(room) {
   // ---------- эфемерное: курсоры, «живые» штрихи, лазер ----------
   const remoteCursors = new Map(); // peerId -> {x,y,page,name,color,t}
   const remoteLive = new Map(); // sid -> {...}
+  const liveEnded = new Set(); // линии собеседника, которые уже закончены
+  // Подстраховка: живой след без обновлений дольше 10 с (связь оборвалась посреди линии) убираем
+  setInterval(() => { const now = Date.now(); let ch = false; for (const [k, l] of remoteLive) if (now - (l.at || 0) > 10000) { remoteLive.delete(k); ch = true; } if (ch) invalidate(false); }, 2000);
   const peersById = new Map();
   hub.on('ephemeral', (o) => {
     switch (o.t) {
@@ -410,12 +413,14 @@ function startBoard(room) {
       case 'bye': remoteCursors.delete(o.id); for (const [k, l] of remoteLive) if (l.peer === o.id) remoteLive.delete(k); if (S.follow === o.id) S.follow = null; break;
       case 'cur': if (o.hide) remoteCursors.delete(o.id); else remoteCursors.set(o.id, { ...o, at: Date.now() }); break;
       case 'live': {
+        if (liveEnded.has(o.sid)) break; // опоздавший кусок уже законченной линии — не воскрешаем его
         let l = remoteLive.get(o.sid);
         if (!l) { l = { ...o, pts: [] }; remoteLive.set(o.sid, l); }
+        l.at = Date.now();
         for (let i = 0; i + 2 < o.pts.length; i += 3) l.pts.push([o.pts[i], o.pts[i + 1], o.pts[i + 2]]);
         break;
       }
-      case 'liveEnd': remoteLive.delete(o.sid); break;
+      case 'liveEnd': remoteLive.delete(o.sid); liveEnded.add(o.sid); if (liveEnded.size > 500) liveEnded.delete(liveEnded.values().next().value); invalidate(false); break;
       case 'view': {
         const p = peersById.get(o.id); if (p) p.view = o;
         if (S.follow === o.id) applyPeerView(o);
@@ -445,6 +450,12 @@ function startBoard(room) {
 
   // живой штрих — накапливаем точки и отправляем раз в кадр
   let liveOut = null, liveFlushT = 0;
+  // Конец линии: сначала отправить последние точки, потом «конец» — иначе хвост приходит позже конца и залипает у собеседника
+  function liveEnd(g) {
+    if (liveFlushT) { cancelAnimationFrame(liveFlushT); liveFlushT = 0; }
+    if (liveOut) { if (liveOut.sid === g.sid) hub.broadcast(liveOut); liveOut = null; }
+    hub.broadcast({ t: 'liveEnd', sid: g.sid });
+  }
   function liveSend(g, pts) {
     if (!liveOut) liveOut = { t: 'live', sid: g.sid, peer: me.id, page: S.page, color: g.color, size: g.size, kind: g.kind, thin: g.thin, pts: [] };
     for (const p of pts) liveOut.pts.push(+p[0].toFixed(1), +p[1].toFixed(1), +p[2].toFixed(2));
@@ -877,7 +888,7 @@ function startBoard(room) {
       const vy = sy < Z ? -f(Z - sy, Z) : sy > H - ZB ? f(sy - (H - ZB), ZB) : 0;
       return [vx, vy];
     }
-    if (!gesture && lastPtr.kind !== 'touch' && sy > 70 && sy < H - 8) {
+    if (!gesture && lastPtr.kind === 'mouse' && sy > 70 && sy < H - 8) { // перо у края — доска стоит на месте
       const Z = 6;
       const dir = sx <= Z ? -1 : sx >= W - 1 - Z ? 1 : 0;
       if (!dir) { hoverEdgeSince = 0; return [0, 0]; }
@@ -1013,9 +1024,9 @@ function startBoard(room) {
       });
       if (g.prevId) S.hidden.delete(g.prevId);
       lastInk = { id, t: performance.now(), kind, color: g.color, size: g.size, keys: sb.keys, end: sb.isDot ? [sb.start[0], sb.start[1]] : [sb.raw[0], sb.raw[1]] };
-      hub.broadcast({ t: 'liveEnd', sid: g.sid });
+      liveEnd(g);
     };
-    g.cancel = () => { stopHold(); if (g.prevId) S.hidden.delete(g.prevId); hub.broadcast({ t: 'liveEnd', sid: g.sid }); };
+    g.cancel = () => { stopHold(); if (g.prevId) S.hidden.delete(g.prevId); liveEnd(g); };
     return g;
   }
   const HOLD_MS = 550;
@@ -1716,11 +1727,14 @@ function startBoard(room) {
     if (!bb) { selBar.classList.add('away'); return; }
     const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]);
     const w = selBar.offsetWidth, h = selBar.offsetHeight;
-    const topLimit = toolbar.getBoundingClientRect().bottom + 8;
+    const pos = prefs.barPos || 'top', tbr = toolbar.getBoundingClientRect();
+    const topLimit = pos === 'top' ? tbr.bottom + 8 : 62;
+    const bottomLimit = pos === 'bottom' ? tbr.top - 8 : H - 8;
+    const rightLimit = pos === 'right' ? tbr.left - 8 : W - 8;
     let top = y0 - h - 18;
     if (top < topLimit) top = y1 + 18;
-    if (top + h > H - 8) top = Math.max(topLimit, Math.min(y0 + 8, H - h - 8));
-    selBar.style.left = Math.round(clamp((x0 + x1) / 2 - w / 2, 8, W - w - 8)) + 'px';
+    if (top + h > bottomLimit) top = Math.max(topLimit, Math.min(y0 + 8, bottomLimit - h));
+    selBar.style.left = Math.round(clamp((x0 + x1) / 2 - w / 2, 8, rightLimit - w)) + 'px';
     selBar.style.top = Math.round(top) + 'px';
     selBar.classList.remove('away');
   }
@@ -2236,8 +2250,14 @@ function startBoard(room) {
     const p = el('div', { class: 'panel pop' }, content);
     document.body.append(p); popovers.add(p);
     const r = anchor.getBoundingClientRect(); const pr = p.getBoundingClientRect();
-    p.style.top = r.bottom + 8 + 'px';
-    p.style.left = clamp(align === 'right' ? r.right - pr.width : r.left, 8, W - pr.width - 8) + 'px';
+    const side = toolbar.contains(anchor) ? (prefs.barPos || 'top') : 'top';
+    if (side === 'right') { // слева от кнопки
+      p.style.left = Math.max(8, r.left - 8 - pr.width) + 'px';
+      p.style.top = clamp(r.top, 8, H - pr.height - 8) + 'px';
+    } else {
+      p.style.top = (side === 'bottom' ? Math.max(8, r.top - 8 - pr.height) : r.bottom + 8) + 'px';
+      p.style.left = clamp(align === 'right' ? r.right - pr.width : r.left, 8, W - pr.width - 8) + 'px';
+    }
     p.addEventListener('pointerdown', (e) => e.stopPropagation());
     setTimeout(() => document.addEventListener('pointerdown', function h(e) { if (!p.contains(e.target)) { p.remove(); popovers.delete(p); document.removeEventListener('pointerdown', h, true); } }, true), 0);
     return p;
@@ -2266,7 +2286,11 @@ function startBoard(room) {
   // Между кнопкой и окном — невидимый «мостик», чтобы по дороге вниз окно не закрылось.
   function hoverPop(pop, anchor, gname) {
     const r = anchor.getBoundingClientRect(), pr = pop.getBoundingClientRect();
-    const bridge = el('div', { class: 'pop-bridge', style: `left:${Math.min(r.left, pr.left)}px;top:${r.bottom - 2}px;width:${Math.max(r.right, pr.right) - Math.min(r.left, pr.left)}px;height:${Math.max(4, pr.top - r.bottom + 4)}px` });
+    let bx, by, bw, bh;
+    if (pr.right <= r.left + 1) { bx = pr.right - 2; bw = r.left - pr.right + 4; by = Math.min(r.top, pr.top); bh = Math.max(r.bottom, pr.bottom) - by; } // окно слева
+    else if (pr.bottom <= r.top + 1) { by = pr.bottom - 2; bh = r.top - pr.bottom + 4; bx = Math.min(r.left, pr.left); bw = Math.max(r.right, pr.right) - bx; } // окно сверху
+    else { by = r.bottom - 2; bh = Math.max(4, pr.top - r.bottom + 4); bx = Math.min(r.left, pr.left); bw = Math.max(r.right, pr.right) - bx; } // окно снизу
+    const bridge = el('div', { class: 'pop-bridge', style: `left:${bx}px;top:${by}px;width:${Math.max(4, bw)}px;height:${Math.max(4, bh)}px` });
     document.body.append(bridge); popovers.add(bridge);
     const gp = { gname, el: pop, bridge };
     groupPop = gp;
@@ -2348,10 +2372,11 @@ function startBoard(room) {
     }
     toolbar.append(el('div', { class: 'sep' }));
     const cur = currentColor();
-    COLORS.forEach((c, i) => toolbar.append(el('button', { class: 'cbtn' + (c === cur ? ' on' : ''), title: `${COLOR_NAMES[i]} — ${i + 1}`, style: `--c:${c}`, onclick: () => setColor(c) })));
+    toolbar.append(el('div', { class: 'colors' }, COLORS.map((c, i) => el('button', { class: 'cbtn' + (c === cur ? ' on' : ''), title: `${COLOR_NAMES[i]} — ${i + 1}`, style: `--c:${c}`, onclick: () => setColor(c) }))));
     toolbar.append(el('div', { class: 'sep' }));
-    toolbar.append(el('button', { class: 'tbtn', title: 'Отменить своё действие — Ctrl+Z', onclick: doUndo }, icon('undo')));
-    toolbar.append(el('button', { class: 'tbtn', title: 'Вернуть — Ctrl+Shift+Z или Ctrl+Y', onclick: doRedo }, icon('redo')));
+    toolbar.append(el('div', { class: 'ur' },
+      el('button', { class: 'tbtn', title: 'Отменить своё действие — Ctrl+Z', onclick: doUndo }, icon('undo')),
+      el('button', { class: 'tbtn', title: 'Вернуть — Ctrl+Shift+Z или Ctrl+Y', onclick: doRedo }, icon('redo'))));
     if (typeof layoutBars === 'function') layoutBars();
   }
 
@@ -2412,6 +2437,9 @@ function startBoard(room) {
       el('div', { class: 'mh' }, 'Лист'),
       item('Показать всё на листе', fitContent, 'Shift+1'),
       item('Удалить этот лист', () => deletePage(S.page)),
+      el('div', { class: 'mh' }, 'Панель инструментов'),
+      el('div', { class: 'row' }, ...[['top', 'Сверху'], ['bottom', 'Снизу'], ['right', 'Справа']].map(([id, label]) =>
+        el('button', { class: 'chip' + ((prefs.barPos || 'top') === id ? ' on' : ''), onclick: () => { prefs.barPos = id; savePrefs(); closePopovers(); renderToolbar(); invalidate(false); } }, label))),
       el('div', { class: 'mh' }, 'Прочее'),
       item((prefs.peerCursor ? 'Скрыть' : 'Показывать') + ' курсор собеседника', togglePeerCursor, 'Shift+C'),
       item('Настройки пера и мыши…', showSettings),
@@ -2474,13 +2502,40 @@ function startBoard(room) {
   // (левая и правая панели имеют фиксированную наибольшую ширину), поэтому при смене инструмента,
   // названия или статуса она не сдвигается ни на пиксель.
   const LEFT_MAX = 400, RIGHT_W = 430;
+  // Панель: сверху (по умолчанию), снизу или справа — выбирается в меню
   function layoutBars() {
-    const tw = toolbar.offsetWidth; const left = Math.round((W - tw) / 2);
-    const row1 = left >= LEFT_MAX + 20 && left + tw <= W - RIGHT_W - 20;
-    toolbar.style.left = Math.max(10, left) + 'px';
-    toolbar.style.top = row1 ? '10px' : '58px';
-    const below = (row1 ? 10 : 58) + 54;
-    toasts.style.top = below + 'px';
+    const pos = prefs.barPos || 'top';
+    toolbar.classList.toggle('vert', pos === 'right');
+    document.body.dataset.bar = pos;
+    toolbar.style.right = ''; toolbar.style.bottom = '';
+    let bottomUsed = 0;
+    if (pos === 'right') {
+      const top = 62, avail = H - top - 10; // масштаб уходит левее панели, панель может занять всю высоту
+      toolbar.style.maxHeight = avail + 'px';
+      const th = toolbar.offsetHeight;
+      toolbar.style.left = W - toolbar.offsetWidth - 10 + 'px';
+      toolbar.style.top = Math.round(top + Math.max(0, (avail - th) / 2)) + 'px';
+      toasts.style.top = '62px';
+    } else {
+      toolbar.style.maxHeight = '';
+      const tw = toolbar.offsetWidth; const left = Math.round((W - tw) / 2);
+      toolbar.style.left = Math.max(10, left) + 'px';
+      if (pos === 'bottom') {
+        toolbar.style.top = H - toolbar.offsetHeight - 10 + 'px';
+        toasts.style.top = '62px';
+        bottomUsed = toolbar.offsetHeight + 10;
+      } else {
+        const row1 = left >= LEFT_MAX + 20 && left + tw <= W - RIGHT_W - 20;
+        toolbar.style.top = row1 ? '10px' : '58px';
+        toasts.style.top = (row1 ? 10 : 58) + 54 + 'px';
+      }
+    }
+    // масштаб и строка «новая версия» не должны наезжать на нижнюю панель
+    const tb = toolbar.getBoundingClientRect();
+    const zoomHit = pos === 'bottom' && tb.right > W - 150;
+    document.body.style.setProperty('--bar-bottom', (pos === 'bottom' ? bottomUsed + 8 : 12) + 'px');
+    document.body.style.setProperty('--zoom-bottom', (zoomHit ? bottomUsed + 8 : 10) + 'px');
+    document.body.style.setProperty('--zoom-right', (pos === 'right' ? W - tb.left + 8 : 10) + 'px');
   }
   new ResizeObserver(layoutBars).observe(document.body);
   function renderStatus(st = hub.status()) {
