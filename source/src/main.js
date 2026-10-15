@@ -6,7 +6,7 @@ import {
   drawItem, drawBackground, setAsyncLoad, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf,
 } from './render.js';
 import { compileMany } from './expr.js';
-import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, regularSolid } from './solid.js';
+import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, solidEdges, regularSolid } from './solid.js';
 import { StrokeBuilder, oneEuro } from './pen.js';
 import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, moveCursor, vertexCursor } from './cursors.js';
 import { ICONS } from './icons.js';
@@ -487,7 +487,9 @@ function startBoard(room) {
         const b = worldBox(it, S.ov); const [a1, b1] = toScreen(b[0], b[1]), [a2, b2] = toScreen(b[2], b[3]);
         octx.globalAlpha = 0.5; octx.strokeRect(a1 - 2, b1 - 2, a2 - a1 + 4, b2 - b1 + 4); octx.globalAlpha = 1;
       }
-      if (bb) {
+      const smo = shapeSel();
+      if (smo) { if (!S.ov) drawShapeOverlay(octx, smo.it, smo.k, S.hoverShape); } // правка формы: без рамки, только вершины
+      else if (bb) {
         const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]);
         const P = selPad();
         octx.setLineDash([5, 4]); octx.strokeRect(x0 - P, y0 - P, x1 - x0 + 2 * P, y1 - y0 + 2 * P); octx.setLineDash([]);
@@ -645,7 +647,7 @@ function startBoard(room) {
   }
   // 0–3 углы (пропорционально), 4–7 середины сторон (верх, право, низ, лево — растянуть по одной оси)
   // Отступ рамки: если у фигуры есть точки-вершины, рамка отходит дальше — углы рамки не налезают на вершины
-  const selPad = () => { const e = editSel(); return e && e.k !== 'rot' ? 14 : 5; };
+  const selPad = () => { const e = editSel(); return !e || e.k === 'rot' ? 5 : e.k === 'line' ? 14 : 10; };
   function handles(bb) {
     const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]); const P = selPad();
     const its = [...S.sel].map((id) => items.get(id)).filter(Boolean);
@@ -720,7 +722,7 @@ function startBoard(room) {
   cvOver.addEventListener('pointerup', onUp, { passive: false });
   cvOver.addEventListener('pointercancel', onUp, { passive: false }); // Windows иногда отменяет перо у края экрана — сохраняем штрих, а не теряем
   cvOver.addEventListener('lostpointercapture', (e) => { if (gesture && gesture.pid === e.pointerId) onUp(e); });
-  const dropHover = () => { if (hover && !gesture) { hover = null; lastPtr = null; invalidate(false); } };
+  const dropHover = () => { if (S.hoverShape && !gesture) { S.hoverShape = null; S.hoverShapeKey = ''; invalidate(false); } if (hover && !gesture) { hover = null; lastPtr = null; invalidate(false); } };
   window.addEventListener('pointermove', (e) => { if (e.target !== cvOver) dropHover(); }, true);
   window.addEventListener('pointerdown', (e) => { if (e.target !== cvOver) dropHover(); }, true);
   document.addEventListener('pointerout', (e) => { if (!e.relatedTarget) dropHover(); });
@@ -880,14 +882,18 @@ function startBoard(room) {
     hoverRaf = requestAnimationFrame(() => {
       hoverRaf = 0; if (gesture || S.tool !== 'select' || S.space) return;
       const [x, y] = hoverXY; let c = 'default';
-      const es = editSel(); const sh = es && editHit(es, x, y);
+      const sm = shapeSel();
+      const hs = sm ? shapeHit(sm, x, y) : null, hk = hs ? JSON.stringify(hs) : '';
+      if (hk !== (S.hoverShapeKey || '')) { S.hoverShape = hs; S.hoverShapeKey = hk; invalidate(false); }
+      if (hs) { cvOver.style.cursor = hs.mode === 'vertex' ? 'none' : moveCursor(); return; }
+      const es = !sm && editSel(); const sh = es && editHit(es, x, y);
       const hv = sh && sh.mode === 'vertex' ? { id: es.it.id, i: sh.i } : null;
       if ((hv && hv.i) !== (S.hoverVert && S.hoverVert.i) || (hv && hv.id) !== (S.hoverVert && S.hoverVert.id)) { S.hoverVert = hv; invalidate(false); }
       if (sh) { cvOver.style.cursor = sh.mode === 'vertex' ? 'none' : sh.mode === 'roll' ? rotateCursor(sh.k) : 'grab'; return; }
       if (S.sel.size) {
         const bb = selectionBox();
         if (bb) {
-          const hi = handleAt(bb, x, y);
+          const hi = sm ? -1 : handleAt(bb, x, y);
           if (hi >= 0) c = handleCursor(hi);
           else { const [wx, wy] = toWorld(x, y); if (wx >= bb[0] && wx <= bb[2] && wy >= bb[1] && wy <= bb[3]) c = moveCursor(); }
         }
@@ -1280,6 +1286,55 @@ function startBoard(room) {
   }
   function editSel() { if (S.sel.size !== 1) return null; const it = items.get([...S.sel][0]); const k = editKind(it); return k ? { it, k } : null; }
   const solidSel = () => { const e = editSel(); return e && e.k === 'solid' ? e.it : null; };
+  // ---------- правка формы (двойной щелчок): рамки нет, видны вершины, сторону можно тянуть целиком ----------
+  const hasShape = (e) => !!e && (e.k === 'poly' || e.k === 'line' || (e.k === 'solid' && solidHandles(e.it).length > 0));
+  function shapeSel() {
+    if (!S.shapeEdit) return null;
+    const e = editSel();
+    if (!e || e.it.id !== S.shapeEdit || !hasShape(e)) { S.shapeEdit = null; S.hoverShape = null; return null; }
+    return e;
+  }
+  function setShapeEdit(id) {
+    S.shapeEdit = id || null; S.hoverShape = null; S.hoverShapeKey = ''; S.hoverVert = null;
+    if (id) S.sel = new Set([id]);
+    updateSelBar(); invalidate(false); updateCursor();
+  }
+  function editEdges(it, k) {
+    if (k === 'solid') return solidEdges(it);
+    if (k !== 'poly') return [];
+    const n = polyLocal(it).length, closed = it.type !== 'poly' || !!it.closed;
+    const E = []; for (let i = 0; i < n - 1; i++) E.push([i, i + 1]);
+    if (closed && n > 2) E.push([n - 1, 0]);
+    return E;
+  }
+  // сдвиг стороны: свободно; Shift — только по горизонтали или вертикали
+  function alongEdge(dx, dy, a, b, ev) {
+    if (ev && ev.shiftKey) { if (Math.abs(dx) > Math.abs(dy)) dy = 0; else dx = 0; }
+    return [dx, dy];
+  }
+  const segDist = (p, a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy || 1; const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L)); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); };
+  // что под курсором в режиме правки формы: вершина (10 px) или сторона (7 px)
+  function shapeHit(e, x, y) {
+    const V = editVerts(e.it, e.k).map((v) => ({ i: v.i, p: toScreen(v.w[0], v.w[1]) }));
+    let best = null, bd = 10;
+    for (const v of V) { const d = Math.hypot(v.p[0] - x, v.p[1] - y); if (d < bd) { bd = d; best = { mode: 'vertex', i: v.i }; } }
+    if (best) return best;
+    const P = new Map(V.map((v) => [v.i, v.p])); bd = 7;
+    for (const [a, b] of editEdges(e.it, e.k)) { const pa = P.get(a), pb = P.get(b); if (!pa || !pb) continue; const d = segDist([x, y], pa, pb); if (d < bd) { bd = d; best = { mode: 'edge', a, b }; } }
+    return best;
+  }
+  // точки на всех вершинах; та, что под курсором (или концы стороны) — залитые, сторона подсвечена
+  function drawShapeOverlay(c, it, k, hot) {
+    const V = new Map(editVerts(it, k).map((v) => [v.i, toScreen(v.w[0], v.w[1])]));
+    c.save(); c.lineCap = 'round';
+    if (hot && hot.mode === 'edge') { const a = V.get(hot.a), b = V.get(hot.b); if (a && b) { c.strokeStyle = 'rgba(76,110,245,.5)'; c.lineWidth = 6; c.beginPath(); c.moveTo(a[0], a[1]); c.lineTo(b[0], b[1]); c.stroke(); } }
+    for (const [i, p] of V) {
+      const on = hot && (hot.mode === 'vertex' ? hot.i === i : hot.mode === 'edge' && (hot.a === i || hot.b === i));
+      c.fillStyle = on ? '#4c6ef5' : '#fff'; c.strokeStyle = on ? '#fff' : '#4c6ef5'; c.lineWidth = 2;
+      c.beginPath(); c.arc(p[0], p[1], on ? 6 : 4.5, 0, Math.PI * 2); c.fill(); c.stroke();
+    }
+    c.restore();
+  }
   // вершины многоугольника в его собственных координатах
   function polyLocal(it) {
     if (it.type === 'rect') return [[0, 0], [it.w, 0], [it.w, it.h], [0, it.h]];
@@ -1300,7 +1355,7 @@ function startBoard(room) {
     return {
       corners, rot: corners.map(([x, y], k) => { const m = [-3, -1, 1, 3][k] * Math.PI / 4; return [x + ROT_R * Math.cos(m), y + ROT_R * Math.sin(m)]; }), // середина дуги
       orbit: e.k === 'solid' ? [(x0 + x1) / 2, y1 + selPad() + 26] : null, c: [(x0 + x1) / 2, (y0 + y1) / 2],
-      verts: big || e.k === 'line' ? editVerts(e.it, e.k).map((v) => ({ i: v.i, p: toScreen(v.w[0], v.w[1]) })) : [],
+      verts: e.k === 'line' ? editVerts(e.it, e.k).map((v) => ({ i: v.i, p: toScreen(v.w[0], v.w[1]) })) : [],
     };
   }
   function editHit(e, x, y) {
@@ -1359,7 +1414,8 @@ function startBoard(room) {
     const rot0 = it.rot || 0;
     let tmp = clean, moved = false, shown = 0, last = pt;
     S.hidden = new Set([it.id]); invalidate();
-    cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : rotateCursor(hit.k);
+    const inShape = S.shapeEdit === it.id;
+    cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : hit.mode === 'edge' ? moveCursor() : rotateCursor(hit.k);
     // центр вращения многоугольника и отрезка — середина рамки вершин
     const vc = (() => { const xs = V0.map((q) => q[0]), ys = V0.map((q) => q[1]); return [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2]; })();
     const rotW = (W, d) => { const r = d * Math.PI / 180, c = Math.cos(r), si = Math.sin(r); return W.map(([x, y]) => [vc[0] + (x - vc[0]) * c - (y - vc[1]) * si, vc[1] + (x - vc[0]) * si + (y - vc[1]) * c]); };
@@ -1384,6 +1440,10 @@ function startBoard(room) {
             nx = o[0] + L * Math.cos(a); ny = o[1] + L * Math.sin(a);
           }
           W[hit.i] = [nx, ny]; tmp = fromWorld(W);
+        } else if (hit.mode === 'edge') { // сторона едет целиком, остальное на месте; Shift — только по горизонтали или вертикали
+          let [dx, dy] = alongEdge(p[0] - pt[0], p[1] - pt[1], V0[hit.a], V0[hit.b], ev);
+          const W = V0.map((q) => q.slice()); for (const j of [hit.a, hit.b]) W[j] = [V0[j][0] + dx, V0[j][1] + dy];
+          tmp = fromWorld(W);
         } else {
           let d = ang(p) - ang(pt); if (d > 180) d -= 360; if (d < -180) d += 360;
           if (k === 'rot') { let r = rot0 + d; if (ev && ev.shiftKey) r = Math.round(r / 15) * 15; tmp = { ...clean, rot: Math.round(r * 10) / 10 }; shown = r; }
@@ -1393,7 +1453,8 @@ function startBoard(room) {
       },
       drawOver(c) { drawItem(c, tmp, null, S.view.z); },
       drawScreen(c) {
-        if (hit.mode === 'vertex') { const v = editVerts(tmp.type === 'poly' && k === 'poly' ? { ...tmp } : tmp, k)[hit.i] || null; if (v) vertexDot(c, ...toScreen(v.w[0], v.w[1])); }
+        if (inShape) drawShapeOverlay(c, tmp, k, hit);
+        else if (hit.mode === 'vertex') { const v = editVerts(tmp, k)[hit.i] || null; if (v) vertexDot(c, ...toScreen(v.w[0], v.w[1])); }
       },
       end() {
         S.hidden = new Set(); updateCursor();
@@ -1417,7 +1478,8 @@ function startBoard(room) {
     const snap = (a, ev) => (ev && ev.shiftKey ? Math.round(a / 15) * 15 : Math.round(a * 10) / 10);
     const wc = hit.c ? toWorld(hit.c[0], hit.c[1]) : null;
     const ang = (p) => Math.atan2(p[1] - wc[1], p[0] - wc[0]) / (Math.PI / 180);
-    cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : hit.mode === 'roll' ? rotateCursor(hit.k) : 'grabbing';
+    const inShape = S.shapeEdit === it.id;
+    cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : hit.mode === 'edge' ? moveCursor() : hit.mode === 'roll' ? rotateCursor(hit.k) : 'grabbing';
     return {
       hideSel: true,
       move(p, ev) {
@@ -1425,6 +1487,12 @@ function startBoard(room) {
         if (hit.mode === 'vertex') {
           const m = moveVertex(base, hit.i, (p[0] - pt[0]) / s, (p[1] - pt[1]) / s);
           const pin = solidHandles(base).find((h) => h.i !== hit.i)?.i ?? 'c';
+          tmp = { ...base, ...reproject(base, v0, m, pin) };
+        } else if (hit.mode === 'edge') { // ребро едет целиком; Shift — только по горизонтали или вертикали
+          const H0 = solidHandles(base), pa = H0.find((h) => h.i === hit.a)?.p, pb = H0.find((h) => h.i === hit.b)?.p;
+          const [dx, dy] = alongEdge(p[0] - pt[0], p[1] - pt[1], pa, pb, ev);
+          let m = moveVertex(base, hit.a, dx / s, dy / s); m = moveVertex({ ...base, m }, hit.b, dx / s, dy / s);
+          const pin = solidHandles(base).find((h) => h.i !== hit.a && h.i !== hit.b)?.i ?? 'c';
           tmp = { ...base, ...reproject(base, v0, m, pin) };
         } else if (hit.mode === 'roll') {
           let d = ang(p) - ang(pt); if (d > 180) d -= 360; if (d < -180) d += 360;
@@ -1437,7 +1505,8 @@ function startBoard(room) {
       },
       drawOver(c) { drawItem(c, tmp, null, S.view.z); },
       drawScreen(c) {
-        if (hit.mode === 'vertex') { const h = solidHandles(tmp).find((q) => q.i === hit.i); if (h) { const ss = tmp.s || 1; vertexDot(c, ...toScreen(tmp.x + h.p[0] * ss, tmp.y + h.p[1] * ss)); } }
+        if (inShape) drawShapeOverlay(c, tmp, 'solid', hit);
+        else if (hit.mode === 'vertex') { const h = solidHandles(tmp).find((q) => q.i === hit.i); if (h) { const ss = tmp.s || 1; vertexDot(c, ...toScreen(tmp.x + h.p[0] * ss, tmp.y + h.p[1] * ss)); } }
       },
       end() {
         S.hidden = new Set(); updateCursor();
@@ -1450,10 +1519,11 @@ function startBoard(room) {
   }
   function selectGesture(pt, e) {
     const [sx, sy] = [pt[3], pt[4]];
-    const es = editSel();
-    if (es) { const h = editHit(es, sx, sy); if (h) return editGesture(es, h, pt); }
-    // ручки масштаба
-    if (S.sel.size) {
+    const sm = shapeSel();
+    if (sm) { const h = shapeHit(sm, sx, sy); if (h) return editGesture(sm, h, pt); }
+    else { const es = editSel(); if (es) { const h = editHit(es, sx, sy); if (h) return editGesture(es, h, pt); } }
+    // ручки масштаба (в режиме правки формы их нет)
+    if (S.sel.size && !sm) {
       const bb = selectionBox();
       const hs = handles(bb);
       const hi = handleAt(bb, sx, sy);
@@ -1503,8 +1573,16 @@ function startBoard(room) {
     }
     const hit = topHit(pt[0], pt[1], 7, e.altKey);
     const now = Date.now();
-    if (hit && lastClick.id === hit.id && now - lastClick.t < 400) { lastClick = { t: 0, id: null }; editItem(hit); return null; }
-    lastClick = { t: now, id: hit ? hit.id : null };
+    // двойной щелчок — по линии фигуры или внутри её рамки (у незалитой фигуры середина пустая)
+    let dblT = hit;
+    if (!dblT && S.sel.size === 1) { const b1 = selectionBox(); if (b1 && pt[0] >= b1[0] && pt[0] <= b1[2] && pt[1] >= b1[1] && pt[1] <= b1[3]) dblT = items.get([...S.sel][0]); }
+    if (dblT && lastClick.id === dblT.id && now - lastClick.t < 400) {
+      lastClick = { t: 0, id: null };
+      if (!dblT.locked && hasShape({ it: dblT, k: editKind(dblT) })) setShapeEdit(S.shapeEdit === dblT.id ? null : dblT.id); // фигура: правка формы вкл/выкл
+      else editItem(dblT);
+      return null;
+    }
+    lastClick = { t: now, id: dblT ? dblT.id : null };
     const bb = S.sel.size ? selectionBox() : null;
     const inSel = bb && pt[0] >= bb[0] && pt[0] <= bb[2] && pt[1] >= bb[1] && pt[1] <= bb[3];
     // S.autoBack: id новой фигуры (выделение включилось само) или '*' (выделение на время — после удержания пера)
@@ -1826,6 +1904,10 @@ function startBoard(room) {
     const add = (ic, label, title, f, cls = '') => A.push({ ic, label, title, f, cls });
     const single = its.length === 1 ? its[0] : null;
     if (single && ['text', 'tex', 'graph', 'note'].includes(single.type)) add('pen', 'Изменить', 'Двойной щелчок или Enter', () => editItem(single));
+    if (single && !single.locked && hasShape({ it: single, k: editKind(single) })) {
+      const on = S.shapeEdit === single.id;
+      add('shape', on ? 'Готово' : (single.type === 'line' || single.type === 'arrow' ? 'Тянуть концы' : 'Правка формы'), 'Двойной щелчок по фигуре', () => setShapeEdit(on ? null : single.id), on ? 'on' : '');
+    }
     // «Правильная форма»: выровнять пропорции по меньшей стороне (центр остаётся на месте)
     if (its.some((i) => regularFields(i, true) !== undefined)) add('regular', 'Правильная форма', 'Выровнять пропорции по меньшей стороне — Shift+R', makeRegularSel);
     // геометрия: виды треугольников
@@ -1885,7 +1967,7 @@ function startBoard(room) {
   function updateSelBar() {
     const its = [...S.sel].map((id) => items.get(id)).filter(Boolean);
     if (!its.length || editorOpen) { selBar.hidden = true; selBar.dataset.key = ''; return; }
-    const key = its.map((i) => `${i.id}${i.locked}${i.fill}${i.dash}${i.kind}${i.w}${i.h}${i.pts ? i.pts.length + ':' + i.pts[0] : ''}`).join('|');
+    const key = (S.shapeEdit || '') + its.map((i) => `${i.id}${i.locked}${i.fill}${i.dash}${i.kind}${i.w}${i.h}${i.pts ? i.pts.length + ':' + i.pts[0] : ''}`).join('|');
     if ((selBar.dataset.key === key || selBar._dragging) && !selBar.hidden) { selBar._sync?.(); placeSelBar(); return; } // ничего не поменялось — не трогаем (не мигает)
     selBar.dataset.key = key; selBar.innerHTML = '';
     selBar._sync = null;
@@ -1924,7 +2006,7 @@ function startBoard(room) {
     const bottomLimit = pos === 'bottom' ? tbr.top - 8 : H - 8;
     const rightLimit = pos === 'right' ? tbr.left - 8 : W - 8;
     const leftLimit = pos === 'left' ? tbr.right + 8 : 8;
-    const es = editSel(); const gapT = es ? 42 : 18, gapB = es && es.k === 'solid' ? 64 : es ? 42 : 18; // стрелки поворота у углов, у стереометрии снизу — вращение
+    const es = !shapeSel() && editSel(); const gapT = es ? 42 : 18, gapB = es && es.k === 'solid' ? 64 : es ? 42 : 18; // стрелки поворота у углов, у стереометрии снизу — вращение
     let top = y0 - h - gapT;
     if (top < topLimit) top = y1 + gapB;
     if (top + h > bottomLimit) top = Math.max(topLimit, Math.min(y0 + 8, bottomLimit - h));
@@ -2157,7 +2239,7 @@ function startBoard(room) {
     }
     if (e.altKey) { if (e.key === 'Alt') e.preventDefault(); return; }
     if (poly && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); if (e.key === 'Enter') finishPoly(false); else { poly = null; invalidate(false); } return; }
-    if (e.key === 'Escape') { if (gesture) { gesture.cancel?.(); gesture = null; } closePopovers(); S.sel.clear(); invalidate(); return; }
+    if (e.key === 'Escape') { if (gesture) { gesture.cancel?.(); gesture = null; } closePopovers(); if (shapeSel()) { setShapeEdit(null); return; } S.sel.clear(); invalidate(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       if (S.sel.size) deleteSelection();

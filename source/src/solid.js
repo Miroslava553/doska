@@ -98,18 +98,18 @@ export function solidView(it) {
   });
   const edges = new Map();
   mdl.f.forEach((face, fi) => { for (let i = 0; i < face.length; i++) { const a = face[i], b = face[(i + 1) % face.length]; const k = a < b ? a + ',' + b : b + ',' + a; if (!edges.has(k)) edges.set(k, []); edges.get(k).push(fi); } });
-  const solid = [], dashed = [];
+  const solid = [], dashed = [], hardE = [];
   for (const [k, fs] of edges) {
     const [a, b] = k.split(',').map(Number);
     const hard = fs.length < 2 || mdl.g[fs[0]] !== mdl.g[fs[1]];
     const vis = fs.some((fi) => front[fi]);
-    if (hard) (vis ? solid : dashed).push([a, b]);
+    if (hard) { (vis ? solid : dashed).push([a, b]); hardE.push([a, b]); }
     else if (!mdl.hull && fs.length === 2 && front[fs[0]] !== front[fs[1]]) solid.push([a, b]); // контур цилиндра и конуса
   }
   for (const d of mdl.decor) dashed.push(d);
   const lines = [...chain(solid).map((ix) => ({ pts: ix.map((i) => P[i]), d: false })), ...chain(dashed).map((ix) => ({ pts: ix.map((i) => P[i]), d: true }))];
   if (mdl.hull) { const h = convexHull(P.slice(0, mdl.nMesh)); lines.push({ pts: [...h, h[0]], d: false }); }
-  it._sv = { key, lines, P, handles: mdl.handles };
+  it._sv = { key, lines, P, handles: mdl.handles, hard: hardE };
   return it._sv;
 }
 // рёбра одного вида — в длинные ломаные, чтобы пунктир шёл ровно и по окружности
@@ -165,6 +165,8 @@ export function moveVertex(it, i, dx, dy) {
   m[i] = [m[i][0] + d[0], m[i][1] + d[1], m[i][2] + d[2]];
   return m;
 }
+// Рёбра, оба конца которых можно тянуть (для правки формы)
+export const solidEdges = (it) => { const sv = solidView(it); const hs = new Set(sv.handles); return sv.hard.filter(([a, b]) => hs.has(a) && hs.has(b)); };
 export const solidHandles = (it) => { const sv = solidView(it); return sv.handles.map((i) => ({ i, p: sv.P[i] })); };
 // Правильная форма: вершины как у образца, углы обзора те же, ширина та же
 export function regularSolid(it) {

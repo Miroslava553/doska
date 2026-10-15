@@ -46,5 +46,6 @@ export const ICONS = {
   ctx: s('<circle cx="12" cy="6" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="18" r="1.4" fill="currentColor"/>'),
   dpen: s('<path d="M4.5 19.5l3.8-.9L19 7.9a2 2 0 000-2.8l-.1-.1a2 2 0 00-2.8 0L5.4 15.7z"/><path d="M3 22h2.5M8 22h2.5M13 22h2.5M18 22h2.5" stroke-width="2"/>'),
   regular: s('<path d="M12 3.5l7.4 12.8H4.6z"/><circle cx="12" cy="11.2" r="1.2" fill="currentColor"/><path d="M8.3 9.9l-.9.5M15.7 9.9l.9.5M12 16.3v1.2" />'),
+  shape: s('<path d="M8 6h12l-4 12H4z"/><path d="M8 6h12" stroke-width="3.2" stroke-opacity=".45"/><circle cx="8" cy="6" r="1.6" fill="#fff"/><circle cx="20" cy="6" r="1.6" fill="#fff"/><circle cx="16" cy="18" r="1.6" fill="#fff"/><circle cx="4" cy="18" r="1.6" fill="#fff"/>'),
   full: s('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
 };

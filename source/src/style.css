@@ -74,6 +74,7 @@ input, textarea, select { font: inherit; color: inherit; -webkit-user-select: te
 .ibtn .ic, .ibtn .ic svg { width: 18px; height: 18px; flex: none; }
 .ibtn.danger { color: #c92a2a; }
 .ibtn.danger:hover { background: #fff5f5; }
+.ibtn.on, .ibtn.on:hover { background: var(--accent-soft); color: var(--accent); }
 .badges { position: fixed; inset: 0; z-index: 3; pointer-events: none; }
 .lockbadge { position: absolute; left: 0; top: 0; width: 26px; height: 26px; padding: 4px; border-radius: 50%; border: 0; pointer-events: auto;
   background: rgba(255,255,255,.95); color: #495057; box-shadow: 0 1px 4px rgba(0,0,0,.2); display: grid; place-items: center; }
