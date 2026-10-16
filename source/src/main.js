@@ -251,6 +251,9 @@ function startBoard(room) {
       if (txn.origin === undo) { const it = items.get(id) || before; if (it) undoPages.add(it.page); }
     }
     pageItemsCache.clear();
+    // собеседник закончил действие и сохранил его — его промежуточный вид больше не нужен (иначе на миг двоится)
+    let pvDrop = false;
+    if (txn.origin !== LOCAL && remotePv && remotePv.size) for (const v of remotePv.values()) if (v.tmp || v.ov || v.hid.size || v.er) { v.tmp = null; v.ov = null; v.hid = new Set(); v.er = null; pvDrop = true; }
     for (const id of [...S.sel]) if (!items.has(id)) S.sel.delete(id);
     if (S.editingId && !items.has(S.editingId)) closeEditors(false);
     // Только что добавленные объекты поверх всего — дорисовываем их, не перерисовывая весь лист.
@@ -258,7 +261,7 @@ function startBoard(room) {
     const added = [...changed].filter((id) => !hadBefore.has(id) && items.has(id));
     const onPage = added.filter((id) => items.get(id).page === S.page);
     const top = pageItems().slice(-onPage.length).map((it) => it.id);
-    const simple = added.length === changed.size && !S.ov && !S.hidden.size && onPage.every((id) => top.includes(id));
+    const simple = !pvDrop && added.length === changed.size && !S.ov && !S.hidden.size && onPage.every((id) => top.includes(id));
     if (simple && !dirtyMain) { for (const id of added) if (items.get(id).page === S.page) pendingAppend.push(id); dirtyOver = true; if (!rafId) rafId = requestAnimationFrame(frame); }
     else invalidate();
   });
@@ -381,7 +384,7 @@ function startBoard(room) {
       for (const id of pendingAppend) { const it = items.get(id); if (it && it.page === S.page) drawItem(ctx, it, null, v.z); }
       pendingAppend = [];
     }
-    if (dirtyOver) { dirtyOver = false; renderOver(); placeSelBar(); }
+    if (dirtyOver) { dirtyOver = false; renderOver(); placeSelBar(); pvMaybeSend(); }
   }
   function renderMain() {
     const v = S.view;
@@ -389,11 +392,13 @@ function startBoard(room) {
     drawBackground(ctx, yMeta.get('bg') || 'grid', v, W, H);
     ctx.setTransform(DPR * v.z, 0, 0, DPR * v.z, DPR * v.x, DPR * v.y);
     const [vx0, vy0] = toWorld(0, 0), [vx1, vy1] = toWorld(W, H);
+    const rv = remotePv.size ? remoteView() : {};
     for (const it of pageItems()) {
-      if (S.hidden.has(it.id) || S.editingId === it.id) continue;
-      const b = worldBox(it, S.ov);
+      if (S.hidden.has(it.id) || S.editingId === it.id || rv.hidden?.has(it.id)) continue;
+      const ov = rv.ovById?.get(it.id) || (S.ov && S.ov.copy ? null : S.ov);
+      const b = worldBox(it, ov || S.ov);
       if (b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1) continue;
-      drawItem(ctx, it, S.ov && S.ov.copy ? null : S.ov, v.z, S.pieces?.get(it.id));
+      drawItem(ctx, it, ov, v.z, S.pieces?.get(it.id) || rv.pieces?.get(it.id));
     }
     if (S.ov && S.ov.copy) { // копия под курсором, оригинал остаётся на месте
       ctx.globalAlpha = 0.75;
@@ -413,7 +418,7 @@ function startBoard(room) {
   hub.on('ephemeral', (o) => {
     switch (o.t) {
       case 'hello': peersById.set(o.id, o); break;
-      case 'bye': remoteCursors.delete(o.id); for (const [k, l] of remoteLive) if (l.peer === o.id) remoteLive.delete(k); if (S.follow === o.id) S.follow = null; break;
+      case 'bye': remotePv.delete(o.id); remoteCursors.delete(o.id); for (const [k, l] of remoteLive) if (l.peer === o.id) remoteLive.delete(k); if (S.follow === o.id) S.follow = null; break;
       case 'cur': if (o.hide) remoteCursors.delete(o.id); else remoteCursors.set(o.id, { ...o, at: Date.now() }); break;
       case 'live': {
         if (liveEnded.has(o.sid)) break; // опоздавший кусок уже законченной линии — не воскрешаем его
@@ -421,18 +426,116 @@ function startBoard(room) {
         if (!l) { l = { ...o, pts: [] }; remoteLive.set(o.sid, l); }
         l.at = Date.now();
         for (let i = 0; i + 2 < o.pts.length; i += 3) l.pts.push([o.pts[i], o.pts[i + 1], o.pts[i + 2]]);
+        notePeerActivity(o.peer, o.page, o.sid, o.pts);
         break;
       }
       case 'liveEnd': remoteLive.delete(o.sid); liveEnded.add(o.sid); if (liveEnded.size > 500) liveEnded.delete(liveEnded.values().next().value); invalidate(false); break;
       case 'view': {
         const p = peersById.get(o.id); if (p) p.view = o;
-        if (S.follow === o.id) applyPeerView(o);
+        if (S.follow === o.id) goToPeer(o);
         break;
       }
       case 'summon': applyPeerView(o.view); break;
+      case 'pv': pvReceive(o); return;
     }
     invalidate(false);
   });
+  // ---------- процесс собеседника вживую: выделение, перенос, растяжение, фигуры, ластик, текст ----------
+  const PV_COLOR = '#f76707';
+  const clean = (it) => { const o = {}; for (const k in it) if (k[0] !== '_') o[k] = it[k]; o.id = it.id; return o; };
+  function pvSnapshot() {
+    const o = {};
+    const g = gesture;
+    if (S.sel.size) o.sel = [...S.sel];
+    if (S.ov) o.ov = { ...S.ov, ids: [...S.ov.ids] };
+    if (g && g.pvMarq) o.marq = g.pvMarq().map((v) => Math.round(v * 10) / 10);
+    const tmp = [], hid = [];
+    if (g && g.pvTmp) tmp.push(...g.pvTmp());
+    if (g && (g.pvTmp || g.isEraser) && S.hidden.size) hid.push(...S.hidden);
+    if (g && g.pvEraser) { const e = g.pvEraser(); if (e && e.pts.length) o.er = e; }
+    if (editorOpen && editorOpen.pv) { const e = editorOpen.pv(); tmp.push(...e.tmp); hid.push(...e.hidden); }
+    if (poly && poly.pts.length) {
+      const P = [...poly.pts, poly.cur]; let x0 = Infinity, y0 = Infinity; for (const [x, y] of P) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); }
+      tmp.push({ id: '_pvp', type: 'poly', x: x0, y: y0, s: 1, color: poly.color, size: poly.size, closed: false, pts: P.map(([x, y]) => [x - x0, y - y0]) });
+    }
+    if (tmp.length) o.tmp = tmp.map(clean);
+    if (hid.length) o.hid = hid;
+    return o;
+  }
+  let pvLast = '', pvSentAt = 0, pvTimer = 0;
+  function pvMaybeSend() {
+    const snap = pvSnapshot(); const empty = !Object.keys(snap).length;
+    const key = empty ? '' : JSON.stringify(snap);
+    const now = performance.now();
+    if (key === pvLast && (empty || now - pvSentAt < 1500)) return; // без изменений; раз в 1,5 с — «я тут»
+    if (now - pvSentAt < 40) { if (!pvTimer) pvTimer = setTimeout(() => { pvTimer = 0; pvMaybeSend(); }, 40 - (now - pvSentAt)); return; }
+    pvLast = key; pvSentAt = now;
+    hub.broadcast({ t: 'pv', id: me.id, page: S.page, ...snap });
+  }
+  setInterval(pvMaybeSend, 250);
+  // приём: состояние каждого собеседника
+  var remotePv = new Map(); // (var — наблюдатель за доской может сработать раньше этой строки) peerId -> {page, sel, ov, marq, tmp, hid, er, at}
+  function pvReceive(o) {
+    const prev = remotePv.get(o.id);
+    if (!o.sel && !o.ov && !o.marq && !o.tmp && !o.hid && !o.er) { remotePv.delete(o.id); invalidate(); return; }
+    const st = { page: o.page, sel: o.sel || null, marq: o.marq || null, tmp: o.tmp || null, hid: new Set(o.hid || []), at: Date.now(),
+      ov: o.ov ? { ...o.ov, ids: new Set(o.ov.ids) } : null, er: null };
+    if (o.er && o.page === S.page) { // точный ластик: повторяем стирание по его точкам
+      let er = prev && prev.er && prev.er.sid === o.er.sid ? prev.er : { sid: o.er.sid, n: 0, st: { hidden: new Set(), pieces: new Map() } };
+      const P = o.er.pts;
+      for (let i = er.n; i < P.length; i++) {
+        const [x, y, r] = P[i];
+        if (i === 0) { eraseApply(er.st, x, y, r, true); continue; }
+        const [px, py] = P[i - 1]; const d = Math.hypot(x - px, y - py); const n = Math.max(1, Math.ceil(d / (r * 0.3)));
+        for (let k = 1; k <= n; k++) eraseApply(er.st, px + ((x - px) * k) / n, py + ((y - py) * k) / n, r, true);
+      }
+      er.n = P.length; st.er = er;
+    }
+    remotePv.set(o.id, st); invalidate();
+  }
+  // забытое состояние (связь оборвалась посреди действия) — убираем через 4 с тишины
+  setInterval(() => { const now = Date.now(); let ch = false; for (const [k, v] of remotePv) if (now - v.at > 4000) { remotePv.delete(k); ch = true; } if (ch) invalidate(); }, 1000);
+  // что из чужих действий касается рисования на этом листе
+  function remoteView() {
+    let hidden = null, pieces = null, ovById = null;
+    for (const v of remotePv.values()) {
+      if (v.page !== S.page) continue;
+      for (const id of v.hid) (hidden ||= new Set()).add(id);
+      if (v.er) { for (const id of v.er.st.hidden) (hidden ||= new Set()).add(id); for (const [id, pc] of v.er.st.pieces) (pieces ||= new Map()).set(id, pc); }
+      if (v.ov && !v.ov.copy) for (const id of v.ov.ids) (ovById ||= new Map()).set(id, v.ov);
+    }
+    return { hidden, pieces, ovById };
+  }
+
+  // Где собеседник сейчас пишет: рамка его последней линии (обновляется, пока он пишет)
+  const peerAct = new Map(); // peerId -> { page, sid, x0, y0, x1, y1, t }
+  function notePeerActivity(id, page, sid, pts) {
+    if (!id || !pts || pts.length < 3) return;
+    let a = peerAct.get(id);
+    if (!a || a.sid !== sid || a.page !== page) { a = { page, sid, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }; peerAct.set(id, a); }
+    for (let i = 0; i + 2 < pts.length; i += 3) { a.x0 = Math.min(a.x0, pts[i]); a.x1 = Math.max(a.x1, pts[i]); a.y0 = Math.min(a.y0, pts[i + 1]); a.y1 = Math.max(a.y1, pts[i + 1]); }
+    a.t = Date.now();
+    // режим «глаз»: собеседник пишет за краем моего экрана — плавно переезжаем туда (масштаб свой)
+    if (S.follow === id && page === S.page) {
+      const lx = pts[pts.length - 3], ly = pts[pts.length - 2]; const [sx, sy] = toScreen(lx, ly);
+      if (sx < 40 || sx > W - 40 || sy < 90 || sy > H - 90) { const p = peersById.get(id); goToPeer(p?.view || { id, page, x0: lx, y0: ly, x1: lx, y1: ly }); }
+    }
+  }
+  // «Глаз»: переносимся к собеседнику, масштаб оставляем свой. Отдаляем, только если то,
+  // где он сейчас пишет, не помещается на мой экран при моём масштабе — и ровно настолько, чтобы поместилось.
+  function goToPeer(o) {
+    if (!o) return;
+    if (o.page && o.page !== S.page && yPages.has(o.page)) setPage(o.page, true);
+    let z = S.view.z, cx = (o.x0 + o.x1) / 2, cy = (o.y0 + o.y1) / 2;
+    const a = peerAct.get(o.id);
+    if (a && a.page === S.page && Date.now() - a.t < 15000 && isFinite(a.x0)) {
+      cx = (a.x0 + a.x1) / 2; cy = (a.y0 + a.y1) / 2;
+      const fit = Math.min((W - 120) / Math.max(1, a.x1 - a.x0), (H - 220) / Math.max(1, a.y1 - a.y0));
+      if (fit < z) z = clamp(fit, 0.08, 12);
+    }
+    S.view = { z, x: W / 2 - cx * z, y: H / 2 - cy * z };
+    invalidate(); renderZoom();
+  }
   function applyPeerView(o) {
     if (o.page && o.page !== S.page && yPages.has(o.page)) setPage(o.page, true);
     const z = clamp(Math.min(W / (o.x1 - o.x0), H / (o.y1 - o.y0)), 0.08, 12);
@@ -475,10 +578,36 @@ function startBoard(room) {
     }
     octx.globalAlpha = 1;
     const g = gesture;
+    // собеседник: то, что он сейчас рисует, тянет, печатает
+    for (const pv of remotePv.values()) {
+      if (pv.page !== S.page) continue;
+      if (pv.tmp) for (const it of pv.tmp) { try { drawItem(octx, it, null, v.z); } catch {} }
+      if (pv.ov && pv.ov.copy) { octx.globalAlpha = 0.75; for (const id of pv.ov.ids) { const it = items.get(id); if (it) drawItem(octx, it, pv.ov, v.z); } octx.globalAlpha = 1; }
+    }
     if (g && g.drawOver) g.drawOver(octx);
     drawPolyPreview(octx);
     // выделение
     octx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    // выделение собеседника — оранжевым, без ручек
+    for (const pv of remotePv.values()) {
+      if (pv.page !== S.page) continue;
+      octx.save(); octx.strokeStyle = PV_COLOR; octx.lineWidth = 1.5;
+      if (pv.sel && !(pv.tmp && pv.tmp.length && pv.hid.size)) {
+        let bb = null;
+        for (const id of pv.sel) {
+          const it = items.get(id); if (!it || pv.hid.has(id)) continue;
+          const w = worldBox(it, pv.ov); const [a1, b1] = toScreen(w[0], w[1]), [a2, b2] = toScreen(w[2], w[3]);
+          if (pv.sel.length > 1) { octx.globalAlpha = 0.5; octx.strokeRect(a1 - 2, b1 - 2, a2 - a1 + 4, b2 - b1 + 4); octx.globalAlpha = 1; }
+          bb = bb ? [Math.min(bb[0], a1), Math.min(bb[1], b1), Math.max(bb[2], a2), Math.max(bb[3], b2)] : [a1, b1, a2, b2];
+        }
+        if (bb) { octx.setLineDash([5, 4]); octx.strokeRect(bb[0] - 6, bb[1] - 6, bb[2] - bb[0] + 12, bb[3] - bb[1] + 12); octx.setLineDash([]); }
+      }
+      if (pv.marq) {
+        const [a1, b1] = toScreen(pv.marq[0], pv.marq[1]), [a2, b2] = toScreen(pv.marq[2], pv.marq[3]);
+        octx.fillStyle = 'rgba(247,103,7,0.08)'; octx.fillRect(a1, b1, a2 - a1, b2 - b1); octx.lineWidth = 1; octx.strokeRect(a1, b1, a2 - a1, b2 - b1);
+      }
+      octx.restore();
+    }
     if (S.sel.size && !(g && g.hideSel)) {
       const bb = selectionBox();
       octx.strokeStyle = '#4c6ef5'; octx.lineWidth = 1;
@@ -727,7 +856,7 @@ function startBoard(room) {
   window.addEventListener('pointerdown', (e) => { if (e.target !== cvOver) dropHover(); }, true);
   document.addEventListener('pointerout', (e) => { if (!e.relatedTarget) dropHover(); });
   document.addEventListener('mouseleave', dropHover);
-  cvOver.addEventListener('pointerleave', (e) => { if (!gesture) { lastPtr = null; hover = null; hub.broadcast({ t: 'cur', id: me.id, hide: true }); invalidate(false); } });
+  cvOver.addEventListener('pointerleave', (e) => { if (e.pointerType === 'pen') lastPenHover = null; if (!gesture) { lastPtr = null; hover = null; hub.broadcast({ t: 'cur', id: me.id, hide: true }); invalidate(false); } });
   cvOver.addEventListener('contextmenu', (e) => e.preventDefault());
   cvOver.addEventListener('dblclick', (e) => e.preventDefault());
 
@@ -757,7 +886,16 @@ function startBoard(room) {
     const eraserEnd = e.button === 5 || (e.buttons & 32);
     if (e.button === 1 || S.space || S.tool === 'hand' || barrel || (kind === 'mouse' && e.button === 2)) g = panGesture(e);
     else if (eraserEnd) g = eraserGesture(pt);
-    else if (e.button === 0 || kind !== 'mouse') g = toolGesture(pt, e);
+    else if (e.button === 0 || kind !== 'mouse') {
+      const h = kind === 'pen' ? lastPenHover : null; lastPenHover = null;
+      const lateMs = h ? e.timeStamp - h.t : 0, lateD = h ? Math.hypot(e.clientX - h.x, e.clientY - h.y) : 0;
+      if (h && INK_TOOLS.has(S.tool) && lateMs > 45 && lateMs < 700 && lateD > 4 && lateD < 240) {
+        const [hx, hy] = toWorld(h.x, h.y);
+        g = inkGesture([hx, hy, pt[2], h.x, h.y], e);
+        g.move(pt, e);
+        STATS.lateStart = (STATS.lateStart || 0) + 1;
+      } else g = toolGesture(pt, e);
+    }
     if (!g) return;
     if (spring && !g.pan) spring.used = true;
     g.pid = e.pointerId; g.touch = kind === 'touch';
@@ -795,8 +933,12 @@ function startBoard(room) {
     download(new Blob([JSON.stringify(data)], { type: 'application/json' }), `запись-пера-${stamp()}.json`);
     if (btn && document.body.contains(btn)) btn.textContent = 'Записать перо';
   }
+  // Последняя точка, где перо висело над экраном (без касания). Windows иногда задерживает начало касания
+  // (перо уже пишет, а браузер узнаёт об этом позже и в другом месте) — тогда начинаем линию отсюда.
+  let lastPenHover = null;
   function onMove(e) {
     if (penRec) recEv('move', e);
+    if (e.pointerType === 'pen' && !e.buttons) lastPenHover = { x: e.clientX, y: e.clientY, t: e.timeStamp };
     if (e.pointerType !== 'touch') {
       const pr = readPoint(e, e.pointerType)[2];
       lastPtr = { sx: e.clientX, sy: e.clientY, p: pr, kind: e.pointerType, ev: { shiftKey: e.shiftKey, altKey: e.altKey } };
@@ -1099,71 +1241,77 @@ function startBoard(room) {
     const len = (r) => { let L = 0; for (let i = 1; i < r.length; i++) L += Math.hypot(r[i][0] - r[i - 1][0], r[i][1] - r[i - 1][1]); return L; };
     return { runs: changed ? runs.filter((r) => r.length >= 2 && len(r) > 0.05) : runs, changed };
   }
+  // Одно касание ластика в точке (wx, wy) радиуса r. st — куда складывать результат: {hidden, pieces}.
+  // Тем же кодом у собеседника повторяется стирание по ходу (по присланным точкам).
+  function eraseApply(st, wx, wy, r, precise) {
+    for (const it of pageItems()) {
+      if (it.locked || st.hidden.has(it.id)) continue;
+      if (it.type === 'image') { continue; }
+      const isStroke = it.type === 'stroke', isShape = ERASABLE_SHAPES.has(it.type);
+      if (precise && (isStroke || isShape)) {
+        const s = it.s || 1; const lx = (wx - it.x) / s, ly = (wy - it.y) / s, lr = r / s;
+        const lb = localBox(it);
+        if (lx < lb[0] - lr || ly < lb[1] - lr || lx > lb[2] + lr || ly > lb[3] + lr) continue;
+        let next = []; let changed = false;
+        if (isStroke) {
+          // полуширина пера при нажиме p (как в perfect-freehand), у пунктира и маркера — постоянная
+          const thin = it.kind === 'pen' ? (it.thin ?? 0.5) : 0;
+          const hw = (p) => it.size * Math.max(0.05, 0.5 - thin * (0.5 - p));
+          const dash = it.kind === 'dash';
+          for (const piece of st.pieces.get(it.id) || [dash ? withArc(decodePts(it), it.doff || 0) : decodePts(it)]) { const c = clipOut(piece, lx, ly, lr, hw, !dash); if (c.changed) changed = true; next.push(...c.runs); }
+          if (changed) {
+            const one = decodePts(it).length === 1;
+            const kept = next.filter((r2) => r2.length >= 2 || one);
+            if (!kept.length) { st.hidden.add(it.id); st.pieces.delete(it.id); } else st.pieces.set(it.id, kept);
+          }
+        } else {
+          let cur = st.pieces.get(it.id);
+          if (!cur) { const sp = shapePolys(it); cur = [...sp.polys.map((pc) => ({ ...pc, pts: withArc(pc.pts, it.type === 'poly' ? it.doff || 0 : 0) })), ...sp.texts.map((t) => ({ text: true, ...t }))]; }
+          for (const pc of cur) {
+            if (pc.text) { next.push(pc); continue; }
+            const c = clipOut(pc.pts, lx, ly, lr, () => pc.w / 2, !pc.dash);
+            if (c.changed) changed = true;
+            for (const rn of c.runs) next.push({ pts: rn, dash: pc.dash, w: pc.w });
+          }
+          if (changed) {
+            if (!next.some((pc) => !pc.text)) { st.hidden.add(it.id); st.pieces.delete(it.id); } else st.pieces.set(it.id, next);
+          }
+        }
+      } else if (isStroke || isShape) {
+        // целиком: линия или фигура исчезает, только если её чернила реально заходят в круг ластика
+        const s = it.s || 1; const lx = (wx - it.x) / s, ly = (wy - it.y) / s, lr = r / s;
+        const lb = localBox(it);
+        if (lx < lb[0] - lr || ly < lb[1] - lr || lx > lb[2] + lr || ly > lb[3] + lr) continue;
+        let hit = false;
+        if (isStroke) {
+          const thin = it.kind === 'pen' ? (it.thin ?? 0.5) : 0;
+          hit = clipOut(decodePts(it), lx, ly, lr, (p) => it.size * Math.max(0.05, 0.5 - thin * (0.5 - p))).changed;
+        } else {
+          const filled = it.fill && (it.type === 'rect' || it.type === 'ellipse' || (it.type === 'poly' && it.closed));
+          hit = (filled && hitItem(it, wx, wy, 0)) || shapePolys(it).polys.some((pc) => clipOut(pc.pts, lx, ly, lr, () => pc.w / 2).changed);
+        }
+        if (hit) st.hidden.add(it.id);
+      } else if (hitItem(it, wx, wy, r)) st.hidden.add(it.id);
+    }
+  
+  }
   function eraserGesture(pt) {
     const precise = prefs.eraserPrecise;
     S.hidden = new Set(); S.pieces = precise ? new Map() : null;
     let last = pt;
-    const g = { isEraser: true };
-    const apply = (wx, wy) => {
-      const r = eraserRadius() / S.view.z;
-      for (const it of pageItems()) {
-        if (it.locked || S.hidden.has(it.id)) continue;
-        if (it.type === 'image') { continue; }
-        const isStroke = it.type === 'stroke', isShape = ERASABLE_SHAPES.has(it.type);
-        if (precise && (isStroke || isShape)) {
-          const s = it.s || 1; const lx = (wx - it.x) / s, ly = (wy - it.y) / s, lr = r / s;
-          const lb = localBox(it);
-          if (lx < lb[0] - lr || ly < lb[1] - lr || lx > lb[2] + lr || ly > lb[3] + lr) continue;
-          let next = []; let changed = false;
-          if (isStroke) {
-            // полуширина пера при нажиме p (как в perfect-freehand), у пунктира и маркера — постоянная
-            const thin = it.kind === 'pen' ? (it.thin ?? 0.5) : 0;
-            const hw = (p) => it.size * Math.max(0.05, 0.5 - thin * (0.5 - p));
-            const dash = it.kind === 'dash';
-            for (const piece of S.pieces.get(it.id) || [dash ? withArc(decodePts(it), it.doff || 0) : decodePts(it)]) { const c = clipOut(piece, lx, ly, lr, hw, !dash); if (c.changed) changed = true; next.push(...c.runs); }
-            if (changed) {
-              const one = decodePts(it).length === 1;
-              const kept = next.filter((r2) => r2.length >= 2 || one);
-              if (!kept.length) { S.hidden.add(it.id); S.pieces.delete(it.id); } else S.pieces.set(it.id, kept);
-            }
-          } else {
-            let cur = S.pieces.get(it.id);
-            if (!cur) { const sp = shapePolys(it); cur = [...sp.polys.map((pc) => ({ ...pc, pts: withArc(pc.pts, it.type === 'poly' ? it.doff || 0 : 0) })), ...sp.texts.map((t) => ({ text: true, ...t }))]; }
-            for (const pc of cur) {
-              if (pc.text) { next.push(pc); continue; }
-              const c = clipOut(pc.pts, lx, ly, lr, () => pc.w / 2, !pc.dash);
-              if (c.changed) changed = true;
-              for (const rn of c.runs) next.push({ pts: rn, dash: pc.dash, w: pc.w });
-            }
-            if (changed) {
-              if (!next.some((pc) => !pc.text)) { S.hidden.add(it.id); S.pieces.delete(it.id); } else S.pieces.set(it.id, next);
-            }
-          }
-        } else if (isStroke || isShape) {
-          // целиком: линия или фигура исчезает, только если её чернила реально заходят в круг ластика
-          const s = it.s || 1; const lx = (wx - it.x) / s, ly = (wy - it.y) / s, lr = r / s;
-          const lb = localBox(it);
-          if (lx < lb[0] - lr || ly < lb[1] - lr || lx > lb[2] + lr || ly > lb[3] + lr) continue;
-          let hit = false;
-          if (isStroke) {
-            const thin = it.kind === 'pen' ? (it.thin ?? 0.5) : 0;
-            hit = clipOut(decodePts(it), lx, ly, lr, (p) => it.size * Math.max(0.05, 0.5 - thin * (0.5 - p))).changed;
-          } else {
-            const filled = it.fill && (it.type === 'rect' || it.type === 'ellipse' || (it.type === 'poly' && it.closed));
-            hit = (filled && hitItem(it, wx, wy, 0)) || shapePolys(it).polys.some((pc) => clipOut(pc.pts, lx, ly, lr, () => pc.w / 2).changed);
-          }
-          if (hit) S.hidden.add(it.id);
-        } else if (hitItem(it, wx, wy, r)) S.hidden.add(it.id);
-      }
-    };
+    const g = { isEraser: true, sid: uid(), precise };
+    g.pvEraser = () => (precise ? { sid: g.sid, pts: trail } : null);
+    const rec = (p) => { trail.push([Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10, Math.round(eraserRadius() / S.view.z * 100) / 100]); };
+    const trail = []; // точки ластика — собеседник повторяет по ним стирание
+    const apply = (wx, wy) => { eraseApply(S, wx, wy, eraserRadius() / S.view.z, precise); };
     // круги ластика ставим часто (через 0,3 радиуса) — край стёртого ровный, без зубцов
     const step = (p) => {
       const d = Math.hypot(p[0] - last[0], p[1] - last[1]); const r = eraserRadius() / S.view.z;
       const n = Math.max(1, Math.ceil(d / (r * 0.3)));
       for (let i = 1; i <= n; i++) apply(last[0] + ((p[0] - last[0]) * i) / n, last[1] + ((p[1] - last[1]) * i) / n);
-      last = p; invalidate();
+      last = p; rec(p); invalidate();
     };
-    apply(pt[0], pt[1]); invalidate();
+    apply(pt[0], pt[1]); rec(pt); invalidate();
     g.move = (p) => step(p);
     g.end = () => {
       const hidden = S.hidden, pieces = S.pieces;
@@ -1222,6 +1370,7 @@ function startBoard(room) {
     };
     const g = {
       move(p, ev) { cur = p; shift = !!(ev && ev.shiftKey); },
+      pvTmp() { return clickOnly() ? [] : [{ ...geom(), color, size, s: 1, id: '_pv' }]; },
       drawOver(c) {
         if (clickOnly()) return; // пока не потянули — ничего не показываем: отпустишь сразу — встанет правильная, потянешь — твоя
         const it = { ...geom(), color, size, s: 1, id: '_preview' };
@@ -1431,6 +1580,7 @@ function startBoard(room) {
     };
     return {
       hideSel: true,
+      pvTmp: () => (moved ? [tmp] : []),
       move(p, ev) {
         moved = true; last = p;
         if (hit.mode === 'vertex') {
@@ -1482,6 +1632,7 @@ function startBoard(room) {
     cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : hit.mode === 'edge' ? moveCursor() : hit.mode === 'roll' ? rotateCursor(hit.k) : 'grabbing';
     return {
       hideSel: true,
+      pvTmp: () => (moved ? [tmp] : []),
       move(p, ev) {
         moved = true; lastS = [p[3], p[4]];
         if (hit.mode === 'vertex') {
@@ -1627,9 +1778,10 @@ function startBoard(room) {
     // рамка или лассо
     if (!e.shiftKey) S.sel.clear();
     const base = new Set(S.sel);
-    const lasso = prefs.lasso; const path = [[pt[0], pt[1]]]; let cur = pt;
+    const lasso = false; const path = [[pt[0], pt[1]]]; let cur = pt;
     const g = {
       move(p) { cur = p; if (lasso) path.push([p[0], p[1]]); update(); },
+      pvMarq: () => [pt[0], pt[1], cur[0], cur[1]],
       drawScreen(c) {
         c.strokeStyle = '#4c6ef5'; c.fillStyle = 'rgba(76,110,245,0.08)'; c.lineWidth = 1;
         if (lasso) { c.beginPath(); path.forEach(([x, y], i) => { const [a, b] = toScreen(x, y); i ? c.lineTo(a, b) : c.moveTo(a, b); }); c.closePath(); c.fill(); c.setLineDash([4, 3]); c.stroke(); c.setLineDash([]); }
@@ -1689,7 +1841,7 @@ function startBoard(room) {
     };
     S.editingId = it ? it.id : null;
     layer.append(ta); place(); ta.focus(); invalidate();
-    ta.addEventListener('input', place);
+    ta.addEventListener('input', () => { place(); pvMaybeSend(); });
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); closeEditors(true); }
       e.stopPropagation();
@@ -1697,6 +1849,7 @@ function startBoard(room) {
     ta.addEventListener('blur', () => setTimeout(() => { if (editorOpen && editorOpen.ta === ta) closeEditors(true); }, 0));
     editorOpen = {
       ta, reposition: place,
+      pv: () => ({ tmp: ta.value ? [isNote ? { ...it, text: ta.value } : { ...(it || { id: '_pvt', type: 'text', page: S.page, x, y, s: 1, fs, color }), text: ta.value }] : [], hidden: it ? [it.id] : [] }),
       close(commit) {
         ta.remove(); S.editingId = null;
         const text = ta.value.replace(/\s+$/, '');
@@ -1770,7 +1923,9 @@ function startBoard(room) {
       el('div', { class: 'row end' }, el('button', { class: 'btn', onclick: () => closeEditors(false) }, 'Отмена'), el('button', { class: 'btn primary', onclick: commit }, it ? 'Сохранить' : 'Вставить')),
     ]);
     upd(); ta.focus();
-    editorOpen = { close() { p.remove(); } };
+    ta.addEventListener('input', () => pvMaybeSend());
+    editorOpen = { close() { p.remove(); },
+      pv: () => ({ tmp: ta.value.trim() ? [{ ...(it || { id: '_pvf', type: 'tex', page: S.page, x: wx, y: wy, s: 1, fs, color }), tex: ta.value }] : [], hidden: it ? [it.id] : [] }) };
   }
 
   function openGraphEditor(it, wx, wy) {
@@ -1803,7 +1958,12 @@ function startBoard(room) {
       el('div', { class: 'row end' }, el('button', { class: 'btn', onclick: () => closeEditors(false) }, 'Отмена'), el('button', { class: 'btn primary', onclick: commit }, it ? 'Сохранить' : 'Вставить')),
     ]);
     check(); ta.focus(); ta.select();
-    editorOpen = { close() { p.remove(); } };
+    ta.addEventListener('input', () => pvMaybeSend());
+    editorOpen = { close() { p.remove(); },
+      pv: () => {
+        let ok = false; try { ok = compileMany(ta.value).length > 0; } catch {}
+        return { tmp: ok ? [{ ...(it || { id: '_pvg', type: 'graph', page: S.page, x: wx, y: wy, s: 1, w: f.w, h: f.h, color: prefs.penColor, xmin: f.xmin, xmax: f.xmax, ymin: f.ymin, ymax: f.ymax }), expr: ta.value.trim() }] : [], hidden: it ? [it.id] : [] };
+      } };
   }
 
   // ---------- панель действий над выделением ----------
@@ -2109,7 +2269,6 @@ function startBoard(room) {
     if (t === 'image') { pickFile(null); return; }
     if (S.tool === t && !opts.noToggle && !(t === 'select' && S.autoBack)) { // V при автовыделении — просто остаёмся в выделении
       if (t === 'eraser') { prefs.eraserPrecise = !prefs.eraserPrecise; savePrefs(); }
-      if (t === 'select') { prefs.lasso = !prefs.lasso; savePrefs(); }
     }
     if (poly) finishPoly(false);
     // фигуру выбрали заново (пришли от другого инструмента) — толщина снова как у ручки
@@ -2586,7 +2745,6 @@ function startBoard(room) {
   const BAR = ['select', 'hand', 'pen', 'eraser', 'hl', 'dpen', '|', '@shapes', '|', 'text', 'tex', 'graph', '@more'];
   const toolDef = (id) => TOOLS.find((t) => t.id === id);
   function toolIcon(id) {
-    if (id === 'select' && prefs.lasso) return 'lasso';
     if (id === 'eraser' && prefs.eraserPrecise) return 'eraserPrecise';
     return id;
   }
@@ -2772,7 +2930,6 @@ function startBoard(room) {
       el('div', { class: 'row' }, ...[['top', 'Сверху'], ['bottom', 'Снизу'], ['left', 'Слева'], ['right', 'Справа']].map(([id, label]) =>
         el('button', { class: 'chip' + ((prefs.barPos || 'top') === id ? ' on' : ''), onclick: () => { prefs.barPos = id; savePrefs(); closePopovers(); renderToolbar(); invalidate(false); } }, label))),
       el('div', { class: 'mh' }, 'Прочее'),
-      item('Настройки пера и мыши…', showSettings),
       item('Горячие клавиши и подсказки', showHelp, '?'),
     ]);
   }
@@ -2829,7 +2986,7 @@ function startBoard(room) {
   // Панель инструментов всегда строго по центру. Строку выбираем только по ширине окна
   // (левая и правая панели имеют фиксированную наибольшую ширину), поэтому при смене инструмента,
   // названия или статуса она не сдвигается ни на пиксель.
-  const LEFT_MAX = 400, RIGHT_W = 430;
+  const LEFT_MAX = 400, RIGHT_W = 430, BAR_LIFT = 30;
   // Панель: сверху (по умолчанию), снизу или справа — выбирается в меню
   function layoutBars() {
     const pos = prefs.barPos || 'top';
@@ -2846,23 +3003,28 @@ function startBoard(room) {
       toasts.style.top = '62px';
     } else {
       toolbar.style.maxHeight = '';
-      const tw = toolbar.offsetWidth; const left = Math.round((W - tw) / 2);
+      const tw = toolbar.offsetWidth; let left = Math.round((W - tw) / 2);
+      if (pos === 'bottom') {
+        // в один ряд с масштабом справа, если помещается
+        const lEdge = 10, rEdge = W - 10 - zoomBar.offsetWidth - 10;
+        if (tw <= rEdge - lEdge && (left < lEdge || left + tw > rEdge)) left = Math.round(Math.min(Math.max(left, lEdge), rEdge - tw));
+      }
       toolbar.style.left = Math.max(10, left) + 'px';
       if (pos === 'bottom') {
-        toolbar.style.top = H - toolbar.offsetHeight - 10 + 'px';
+        toolbar.style.top = H - toolbar.offsetHeight - BAR_LIFT + 'px'; // приподнята от края экрана
         toasts.style.top = '62px';
-        bottomUsed = toolbar.offsetHeight + 10;
+        bottomUsed = toolbar.offsetHeight + BAR_LIFT;
       } else {
         const row1 = left >= LEFT_MAX + 20 && left + tw <= W - RIGHT_W - 20;
         toolbar.style.top = row1 ? '10px' : '58px';
-        toasts.style.top = (row1 ? 10 : 58) + 54 + 'px';
+        toasts.style.top = (row1 ? 10 : 58) + toolbar.offsetHeight + 8 + 'px';
       }
     }
     // масштаб и строка «новая версия» не должны наезжать на нижнюю панель
     const tb = toolbar.getBoundingClientRect();
-    const zoomHit = pos === 'bottom' && tb.right > W - 150;
+    const zoomHit = pos === 'bottom' && tb.right > W - 10 - (zoomBar.offsetWidth || 170) - 6;
     document.body.style.setProperty('--bar-bottom', (pos === 'bottom' ? bottomUsed + 8 : 12) + 'px');
-    document.body.style.setProperty('--zoom-bottom', (zoomHit ? bottomUsed + 8 : 28) + 'px');
+    document.body.style.setProperty('--zoom-bottom', (zoomHit ? bottomUsed + 8 : pos === 'bottom' ? BAR_LIFT : 28) + 'px');
     document.body.style.setProperty('--zoom-right', (pos === 'right' ? W - tb.left + 8 : 10) + 'px');
   }
   new ResizeObserver(layoutBars).observe(document.body);
@@ -2891,7 +3053,7 @@ function startBoard(room) {
     const peer = hub.status().peers[0];
     if (!peer) { toast('Собеседник не подключён'); return; }
     S.follow = S.follow ? null : peer.id;
-    if (S.follow) { const p = peersById.get(peer.id); if (p?.view) applyPeerView(p.view); }
+    if (S.follow) { const p = peersById.get(peer.id); if (p?.view) goToPeer(p.view); }
     renderStatus();
   }
   function summon() {
@@ -3043,7 +3205,7 @@ function startBoard(room) {
     renderPages(); invalidate();
     hub.startTabs(room);
     if (!/[?&]nopeer\b/.test(location.search)) hub.startPeer(room);
-    window.__doska = { solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo }; window.__MC = ManualConnect;
+    window.__doska = { remotePv, peersById, peerAct, goToPeer, solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo }; window.__MC = ManualConnect;
   };
   idb.whenSynced.then(start);
   setTimeout(start, 3000); // если IndexedDB недоступна — всё равно запускаемся

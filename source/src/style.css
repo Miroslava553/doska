@@ -304,3 +304,11 @@ kbd { font: 12px ui-monospace, Consolas, monospace; background: #f3f4f6; border:
 .shape-size { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); margin-top: 6px; padding: 10px 8px 4px; }
 .shape-size .ic, .shape-size .ic svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
 .shape-size .sz-row { flex: 1; margin: 0; }
+/* панель и масштаб одной высоты — кнопки 46 px, значки 24 px */
+.toolbar:not(.vert), .zoombar { padding: 5px; gap: 3px; }
+.toolbar:not(.vert) .tbtn, .zoombar .tbtn { width: 46px; height: 46px; border-radius: 10px; }
+.toolbar:not(.vert) .tbtn .ic, .toolbar:not(.vert) .tbtn .ic svg, .zoombar .tbtn .ic, .zoombar .tbtn .ic svg { width: 24px; height: 24px; }
+.toolbar:not(.vert) .tbtn .key { right: 4px; bottom: 2px; font-size: 10px; }
+.toolbar:not(.vert) .tbtn.grp .tri { right: 3px; bottom: 3px; }
+.toolbar:not(.vert) .cbtn { width: 27px; height: 27px; margin: 0 2px; }
+.zoombar .zoom { height: 46px; min-width: 62px; font-size: 14px; border-radius: 10px; }
