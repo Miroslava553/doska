@@ -301,7 +301,7 @@ function drawGraph(ctx, it, scale) {
   ctx.fillRect(0, 0, w, h);
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.clip();
-  const sx = niceStep((xmax - xmin) / Math.max(2, w / 70)), sy = niceStep((ymax - ymin) / Math.max(2, h / 70));
+  const sx = niceStep((xmax - xmin) / Math.max(2, w / 38)), sy = niceStep((ymax - ymin) / Math.max(2, h / 38)); // как в тетради: подпись у каждой единицы, если помещается
   ctx.lineWidth = 1 / scale; ctx.strokeStyle = '#e3e8ef'; ctx.beginPath();
   for (let v = Math.ceil(xmin / sx) * sx; v <= xmax; v += sx) { ctx.moveTo(X(v), 0); ctx.lineTo(X(v), h); }
   for (let v = Math.ceil(ymin / sy) * sy; v <= ymax; v += sy) { ctx.moveTo(0, Y(v)); ctx.lineTo(w, Y(v)); }
@@ -327,13 +327,17 @@ function drawGraph(ctx, it, scale) {
     ctx.fillStyle = '#e03131'; ctx.font = `14px ${FONT}`; ctx.fillText('Ошибка: ' + g.err, 8, h - 10);
   } else {
     const n = Math.max(200, Math.min(2500, Math.round(w * scale)));
+    const colorOf = []; { let c = -1; g.fns.forEach((f, k) => { if (!(f.cond && k > 0 && g.fns[k - 1].cond)) c++; colorOf[k] = c; }); }
+    const col = (k) => (colorOf[k] === 0 && it.color && it.color !== '#1e1e1e' ? it.color : GRAPH_COLORS[colorOf[k] % GRAPH_COLORS.length]);
     g.fns.forEach((f, k) => {
-      ctx.strokeStyle = k === 0 && it.color && it.color !== '#1e1e1e' ? it.color : GRAPH_COLORS[k % GRAPH_COLORS.length];
+      ctx.strokeStyle = col(k);
       ctx.lineWidth = 2.5 / Math.sqrt(scale) ; ctx.lineJoin = 'round'; ctx.beginPath();
       let pen = false, prevY = 0;
+      if (f.kind === 'imp') { drawImplicit(ctx, f, it, X, Y, scale); return; }
       for (let i = 0; i <= n; i++) {
         const xv = xmin + ((xmax - xmin) * i) / n; let yv;
         try { yv = f.fn(xv); } catch { yv = NaN; }
+        if (f.cond && !f.cond(xv, yv)) { pen = false; continue; } // кусочная: только где выполнено условие
         const py = Y(yv);
         if (!Number.isFinite(py) || Math.abs(py) > h * 50) { pen = false; continue; }
         if (pen && Math.abs(py - prevY) > h * 2) pen = false; // разрыв (tg x, 1/x)
@@ -345,15 +349,55 @@ function drawGraph(ctx, it, scale) {
     ctx.font = `14px ${FONT}`;
     g.fns.forEach((f, k) => {
       ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      const label = 'y = ' + f.src.replace(/^\s*y\s*=\s*/i, '');
+      const label = f.kind === 'imp' ? f.src : 'y = ' + f.src.replace(/^\s*y\s*=\s*/i, '');
       const tw = ctx.measureText(label).width;
       ctx.fillRect(6, 6 + k * 20, tw + 8, 19);
-      ctx.fillStyle = k === 0 && it.color && it.color !== '#1e1e1e' ? it.color : GRAPH_COLORS[k % GRAPH_COLORS.length];
+      ctx.fillStyle = col(k);
       ctx.fillText(label, 10, 21 + k * 20);
     });
   }
   ctx.restore();
   ctx.strokeStyle = '#ced4da'; ctx.lineWidth = 1 / scale; ctx.strokeRect(0, 0, w, h);
+}
+
+// Кривая F(x, y) = 0 (окружность, эллипс…): «бегущие квадраты» по сетке, отрезки кешируем
+const impCache = new Map();
+function drawImplicit(ctx, f, it, X, Y, scale) {
+  const { xmin, xmax, ymin, ymax, w, h } = it;
+  const nx = Math.max(60, Math.min(420, Math.round((w * scale) / 3))), ny = Math.max(45, Math.min(320, Math.round((h * scale) / 3)));
+  const key = [f.src, xmin, xmax, ymin, ymax, nx, ny].join('|');
+  let segs = impCache.get(key);
+  if (!segs) {
+    segs = [];
+    const dx = (xmax - xmin) / nx, dy = (ymax - ymin) / ny;
+    const V = new Float64Array((nx + 1) * (ny + 1));
+    for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) { let v; try { v = f.F(xmin + i * dx, ymin + j * dy); } catch { v = NaN; } V[j * (nx + 1) + i] = v; }
+    const lerp = (a, b, va, vb) => a + (b - a) * (va / (va - vb));
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const x0 = xmin + i * dx, y0 = ymin + j * dy, x1 = x0 + dx, y1 = y0 + dy;
+      const a = V[j * (nx + 1) + i], b = V[j * (nx + 1) + i + 1], c = V[(j + 1) * (nx + 1) + i + 1], d = V[(j + 1) * (nx + 1) + i];
+      if (![a, b, c, d].every(Number.isFinite)) continue;
+      const pts = [];
+      if ((a < 0) !== (b < 0)) pts.push([lerp(x0, x1, a, b), y0]);
+      if ((b < 0) !== (c < 0)) pts.push([x1, lerp(y0, y1, b, c)]);
+      if ((c < 0) !== (d < 0)) pts.push([lerp(x1, x0, c, d), y1]);
+      if ((d < 0) !== (a < 0)) pts.push([x0, lerp(y1, y0, d, a)]);
+      // разрыв (1/x и т.п.), а не кривая: значения по краям клетки огромные
+      const big = Math.max(Math.abs(a), Math.abs(b), Math.abs(c), Math.abs(d));
+      if (pts.length >= 2 && big < 1e6) {
+        for (let k = 0; k + 1 < pts.length; k += 2) {
+          const [p, q] = [pts[k], pts[k + 1]];
+          if (f.cond && !(f.cond(p[0], p[1]) && f.cond(q[0], q[1]))) continue;
+          segs.push(p[0], p[1], q[0], q[1]);
+        }
+      }
+    }
+    if (impCache.size > 60) impCache.delete(impCache.keys().next().value);
+    impCache.set(key, segs);
+  }
+  ctx.beginPath();
+  for (let k = 0; k < segs.length; k += 4) { ctx.moveTo(X(segs[k]), Y(segs[k + 1])); ctx.lineTo(X(segs[k + 2]), Y(segs[k + 3])); }
+  ctx.lineCap = 'round'; ctx.stroke();
 }
 
 // значок прямого угла у вершины, где угол 90° (±1,5°)

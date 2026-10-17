@@ -451,7 +451,7 @@ function startBoard(room) {
     if (g && g.pvMarq) o.marq = g.pvMarq().map((v) => Math.round(v * 10) / 10);
     const tmp = [], hid = [];
     if (g && g.pvTmp) tmp.push(...g.pvTmp());
-    if (g && (g.pvTmp || g.isEraser) && S.hidden.size) hid.push(...S.hidden);
+    if (g && ((g.pvTmp && tmp.length) || g.isEraser) && S.hidden.size) hid.push(...S.hidden);
     if (g && g.pvEraser) { const e = g.pvEraser(); if (e && e.pts.length) o.er = e; }
     if (editorOpen && editorOpen.pv) { const e = editorOpen.pv(); tmp.push(...e.tmp); hid.push(...e.hidden); }
     if (poly && poly.pts.length) {
@@ -592,15 +592,20 @@ function startBoard(room) {
     for (const pv of remotePv.values()) {
       if (pv.page !== S.page) continue;
       octx.save(); octx.strokeStyle = PV_COLOR; octx.lineWidth = 1.5;
-      if (pv.sel && !(pv.tmp && pv.tmp.length && pv.hid.size)) {
+      if (pv.sel) {
         let bb = null;
         for (const id of pv.sel) {
-          const it = items.get(id); if (!it || pv.hid.has(id)) continue;
+          let it = items.get(id);
+          if (pv.hid.has(id)) it = pv.tmp && pv.tmp.find((t) => t.id === id); // правит форму — рамка идёт за новой формой
+          if (!it) continue;
           const w = worldBox(it, pv.ov); const [a1, b1] = toScreen(w[0], w[1]), [a2, b2] = toScreen(w[2], w[3]);
           if (pv.sel.length > 1) { octx.globalAlpha = 0.5; octx.strokeRect(a1 - 2, b1 - 2, a2 - a1 + 4, b2 - b1 + 4); octx.globalAlpha = 1; }
           bb = bb ? [Math.min(bb[0], a1), Math.min(bb[1], b1), Math.max(bb[2], a2), Math.max(bb[3], b2)] : [a1, b1, a2, b2];
         }
-        if (bb) { octx.setLineDash([5, 4]); octx.strokeRect(bb[0] - 6, bb[1] - 6, bb[2] - bb[0] + 12, bb[3] - bb[1] + 12); octx.setLineDash([]); }
+        if (bb) { // по пикселям — линия всегда чёткая, не дрожит при движении
+          const q = (v) => Math.round(v) + 0.5; const L = q(bb[0] - 6), T = q(bb[1] - 6), R = q(bb[2] + 6), B = q(bb[3] + 6);
+          octx.lineWidth = 1.2; octx.setLineDash([5, 4]); octx.strokeRect(L, T, R - L, B - T); octx.setLineDash([]);
+        }
       }
       if (pv.marq) {
         const [a1, b1] = toScreen(pv.marq[0], pv.marq[1]), [a2, b2] = toScreen(pv.marq[2], pv.marq[3]);
@@ -1580,7 +1585,7 @@ function startBoard(room) {
     };
     return {
       hideSel: true,
-      pvTmp: () => (moved ? [tmp] : []),
+      pvTmp: () => [tmp],
       move(p, ev) {
         moved = true; last = p;
         if (hit.mode === 'vertex') {
@@ -1632,7 +1637,7 @@ function startBoard(room) {
     cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : hit.mode === 'edge' ? moveCursor() : hit.mode === 'roll' ? rotateCursor(hit.k) : 'grabbing';
     return {
       hideSel: true,
-      pvTmp: () => (moved ? [tmp] : []),
+      pvTmp: () => [tmp],
       move(p, ev) {
         moved = true; lastS = [p[3], p[4]];
         if (hit.mode === 'vertex') {
@@ -1822,6 +1827,11 @@ function startBoard(room) {
   // ---------- редакторы ----------
   let editorOpen = null;
   function closeEditors(commit) { if (editorOpen) { const e = editorOpen; editorOpen = null; e.close(commit); } }
+  const TEXT_SYMS = [ // ряды → группы
+    [['°', '√', 'π', '∞', '±', '·', '×', '÷'], ['≤', '≥', '≠', '≈'], ['∠', '△', '⊥', '∥', '∈', '⇒', '⇔']],
+    [['α', 'β', 'γ', 'Δ', 'φ', 'ω', 'λ', 'μ'], ['²', '³', 'ⁿ', '₁', '₂'], ['½', '⅓', '¼', '¾', 'a/b']],
+    [['sin', 'cos', 'tg', 'ctg', 'arcsin', 'arccos', 'arctg', 'log', 'ln', 'lim']],
+  ];
   function openTextEditor(it, wx, wy) {
     closeEditors(true);
     const isNote = it && it.type === 'note';
@@ -1839,8 +1849,21 @@ function startBoard(room) {
       if (isNote) { ta.style.width = it.w * z + 'px'; ta.style.height = it.h * z + 'px'; ta.style.padding = 12 * z + 'px'; ta.style.background = it.bg; }
       else { ta.style.height = '0px'; ta.style.width = '0px'; ta.style.width = Math.max(40, ta.scrollWidth + fs * z) + 'px'; ta.style.height = ta.scrollHeight + 'px'; ta.style.paddingTop = fs * z * 0.1 + 'px'; }
     };
+    // готовые символы над полем: щелчок вставляет туда, где курсор (фокус из поля не уходит)
+    const insSym = (t) => { const a = ta.selectionStart, b = ta.selectionEnd; ta.value = ta.value.slice(0, a) + t + ta.value.slice(b); ta.setSelectionRange(a + t.length, a + t.length); ta.dispatchEvent(new Event('input')); };
+    const symBtn = (t) => (t === 'a/b'
+        ? el('button', { class: 'sym frac', title: 'Дробь — откроется формула', onclick: () => { const fx = x, fy = y; closeEditors(true); openTexEditor(null, fx, fy, '\\frac{}{}'); } }, el('span', {}, 'a'), el('span', {}, 'b'))
+        : el('button', { class: 'sym' + (/^[a-z]+$/.test(t) ? ' word' : ''), onclick: () => insSym(t) }, t));
+    const bar = el('div', { class: 'symbar' }, TEXT_SYMS.map((row) => el('div', { class: 'symrow' }, row.map((grp, gi) => [gi ? el('i', { class: 'symsep' }) : null, ...grp.map(symBtn)]).flat())));
+    bar.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); });
+    const placeBar = () => {
+      const r = ta.getBoundingClientRect(), bh = bar.offsetHeight || 70;
+      bar.style.left = Math.round(clamp(r.left, 8, W - (bar.offsetWidth || 400) - 8)) + 'px';
+      bar.style.top = Math.round(r.top - bh - 8 >= 64 ? r.top - bh - 8 : r.bottom + 8) + 'px';
+    };
     S.editingId = it ? it.id : null;
-    layer.append(ta); place(); ta.focus(); invalidate();
+    layer.append(ta, bar); place(); placeBar(); ta.focus(); invalidate();
+    ta.addEventListener('input', placeBar);
     ta.addEventListener('input', () => { place(); pvMaybeSend(); });
     ta.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); closeEditors(true); }
@@ -1848,10 +1871,10 @@ function startBoard(room) {
     });
     ta.addEventListener('blur', () => setTimeout(() => { if (editorOpen && editorOpen.ta === ta) closeEditors(true); }, 0));
     editorOpen = {
-      ta, reposition: place,
+      ta, reposition: () => { place(); placeBar(); },
       pv: () => ({ tmp: ta.value ? [isNote ? { ...it, text: ta.value } : { ...(it || { id: '_pvt', type: 'text', page: S.page, x, y, s: 1, fs, color }), text: ta.value }] : [], hidden: it ? [it.id] : [] }),
       close(commit) {
-        ta.remove(); S.editingId = null;
+        ta.remove(); bar.remove(); S.editingId = null;
         const text = ta.value.replace(/\s+$/, '');
         if (commit) act(() => {
           if (it && items.has(it.id)) { if (!text && !isNote) yItems.delete(it.id); else setFields(it.id, { text }); }
@@ -1862,14 +1885,25 @@ function startBoard(room) {
     };
   }
 
-  function floatingPanel(wx, wy, content) {
-    const p = el('div', { class: 'panel floating' }, content);
+  function floatingPanel(wx, wy, content, cls = '') {
+    const p = el('div', { class: 'panel floating ' + cls }, content);
     layer.append(p);
     const [sx, sy] = wx != null ? toScreen(wx, wy) : [W / 2 - 200, H / 3];
-    const r = p.getBoundingClientRect();
+    const r = p.getBoundingClientRect(), tb = toolbar.getBoundingClientRect(), pos = prefs.barPos || 'top';
+    const topLim = pos === 'top' ? tb.bottom + 8 : 60, botLim = pos === 'bottom' ? tb.top - 8 : H - 8;
     p.style.left = clamp(sx, 8, W - r.width - 8) + 'px';
-    p.style.top = clamp(sy + 12, 60, H - r.height - 8) + 'px';
+    p.style.top = Math.max(topLim, Math.min(sy + 12, botLim - r.height)) + 'px';
     p.addEventListener('pointerdown', (e) => e.stopPropagation());
+    // окно можно двигать за заголовок
+    const head = p.querySelector('.panel-title');
+    if (head) head.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return; e.preventDefault();
+      const ox = e.clientX - p.offsetLeft, oy = e.clientY - p.offsetTop;
+      head.setPointerCapture(e.pointerId); head.classList.add('drag');
+      const mv = (ev) => { p.style.left = clamp(ev.clientX - ox, 8 - p.offsetWidth + 80, W - 80) + 'px'; p.style.top = clamp(ev.clientY - oy, 8, H - 40) + 'px'; };
+      const up = () => { head.removeEventListener('pointermove', mv); head.removeEventListener('pointerup', up); head.classList.remove('drag'); };
+      head.addEventListener('pointermove', mv); head.addEventListener('pointerup', up);
+    });
     p.addEventListener('keydown', (e) => e.stopPropagation());
     return p;
   }
@@ -1882,12 +1916,12 @@ function startBoard(room) {
     ['\\begin{cases}  \\\\  \\end{cases}', 'система'], ['\\overline{}', 'отрезок'], ['\\angle ', '∠'], ['\\triangle ', '△'], ['\\parallel', '∥'], ['\\perp', '⊥'],
     ['\\Rightarrow', '⇒'], ['\\Leftrightarrow', '⇔'], ['\\in', '∈'], ['\\mathbb{R}', 'ℝ'], ['\\text{}', 'текст'],
   ];
-  function openTexEditor(it, wx, wy) {
+  function openTexEditor(it, wx, wy, init = '') {
     closeEditors(true);
     const fs = it ? it.fs : sz('text') + 6;
     const color = it ? it.color : prefs.penColor;
     const ta = el('textarea', { class: 'inp mono', rows: 3, spellcheck: 'false', placeholder: 'например: F = ma  или  x_{1,2} = \\frac{-b \\pm \\sqrt{D}}{2a}' });
-    ta.value = it ? it.tex : '';
+    ta.value = it ? it.tex : init;
     const prev = el('div', { class: 'tex-prev' });
     const upd = () => {
       prev.innerHTML = '';
@@ -1923,19 +1957,26 @@ function startBoard(room) {
       el('div', { class: 'row end' }, el('button', { class: 'btn', onclick: () => closeEditors(false) }, 'Отмена'), el('button', { class: 'btn primary', onclick: commit }, it ? 'Сохранить' : 'Вставить')),
     ]);
     upd(); ta.focus();
+    if (init && !it) { const k = init.indexOf('{}'); if (k >= 0) ta.setSelectionRange(k + 1, k + 1); }
     ta.addEventListener('input', () => pvMaybeSend());
     editorOpen = { close() { p.remove(); },
       pv: () => ({ tmp: ta.value.trim() ? [{ ...(it || { id: '_pvf', type: 'tex', page: S.page, x: wx, y: wy, s: 1, fs, color }), tex: ta.value }] : [], hidden: it ? [it.id] : [] }) };
   }
 
+  const GRAPH_TPL = [
+    ['Прямая', '2x + 1'], ['Парабола', 'x^2 - 2x - 3'], ['Гипербола', '4/x'], ['Корень', 'sqrt(x)'], ['Модуль', '|x - 1|'],
+    ['Кубическая', 'x^3 - 3x'], ['Показательная', '2^x'], ['Логарифм', 'ln(x)'], ['sin', 'sin(x)'], ['cos', 'cos(x)'], ['tg', 'tg(x)'],
+    ['Окружность', '(x - 1)^2 + (y + 2)^2 = 9'], ['Эллипс', 'x^2/9 + y^2/4 = 1'], ['Кусочная', 'x^2 + 2, x >= -1; -2x + 1, x < -1'],
+  ];
+  const prettyExpr = (c) => c.replace(/\^2/g, '²').replace(/\^3/g, '³').replace(/\^x/g, 'ˣ').replace(/sqrt\(x\)/g, '√x').replace(/>=/g, '≥').replace(/<=/g, '≤').replace(/ - /g, ' − ').replace(/-(\d)/g, '−$1').replace(/; /g, ';  ');
   function openGraphEditor(it, wx, wy) {
     closeEditors(true);
-    const f = it || { expr: 'x^2 - 2x - 3', xmin: -5, xmax: 5, ymin: -5, ymax: 5, w: 480, h: 360 };
+    const f = it || { expr: 'x^2 - 2x - 3', xmin: -6, xmax: 6, ymin: -4.5, ymax: 4.5, w: 480, h: 360 }; // клетка одинаковая по x и y — окружность круглая
     const ta = el('textarea', { class: 'inp mono', rows: 3, spellcheck: 'false' }); ta.value = f.expr;
     const num = (v) => el('input', { class: 'inp num', type: 'number', step: 'any', value: v });
     const xmin = num(f.xmin), xmax = num(f.xmax), ymin = num(f.ymin), ymax = num(f.ymax);
     const msg = el('div', { class: 'small muted' });
-    const check = () => { try { const fs = compileMany(ta.value); msg.className = 'small ok'; msg.textContent = fs.length ? `Ок: функций — ${fs.length}` : 'Введите хотя бы одну функцию'; return fs.length > 0; } catch (e) { msg.className = 'small err'; msg.textContent = e.message; return false; } };
+    const check = () => { try { const fs = compileMany(ta.value); msg.className = 'small err'; msg.textContent = fs.length ? '' : 'Введите хотя бы одну функцию'; return fs.length > 0; } catch (e) { msg.className = 'small err'; msg.textContent = e.message; return false; } };
     ta.addEventListener('input', check);
     const commit = () => {
       if (!check()) return;
@@ -1950,13 +1991,43 @@ function startBoard(room) {
       if (newId) selectNew(newId);
     };
     ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); } if (e.key === 'Escape') closeEditors(false); });
+    // Шаблон вставляется в строку там, где курсор: после «+», «−», «*», «(» — складывается с тем, что уже есть,
+    // иначе — отдельный график через «;». Первое число выделяется — можно сразу печатать своё.
+    let fresh = !it;
+    ta.addEventListener('input', () => { fresh = false; });
+    const insTpl = (code) => {
+      const v = ta.value; let a = ta.selectionStart, b = ta.selectionEnd;
+      if (fresh) { a = 0; b = v.length; fresh = false; }
+      const before = v.slice(0, a).replace(/\s+$/, '');
+      const join = !before || /[+\-*/(;\n,=]$/.test(before);
+      const piece = join ? (before && !/[(\n]$/.test(before) ? ' ' : '') + code : '; ' + code;
+      ta.value = v.slice(0, a).replace(/\s+$/, '') + piece + v.slice(b);
+      const at = a - (v.slice(0, a).length - v.slice(0, a).replace(/\s+$/, '').length) + piece.length - code.length;
+      const m = code.match(/(?<!\^)\d+(\.\d+)?/); // первое число, но не степень
+      ta.focus();
+      if (m) ta.setSelectionRange(at + m.index, at + m.index + m[0].length); else ta.setSelectionRange(at + code.length, at + code.length);
+      check(); pvMaybeSend();
+    };
+    // внизу: «Шаблоны» и «Оси» — выпадающие списки, чтобы окно было свободным
+    const menus = [];
+    const dropdown = (label, content, cls) => {
+      const menu = el('div', { class: 'gmenu ' + cls, hidden: true }, content);
+      const btn = el('button', { class: 'btn ddbtn', onclick: () => {
+        const open = menu.hidden; menus.forEach((m) => { m.menu.hidden = true; m.btn.classList.remove('on'); }); menu.hidden = !open; btn.classList.toggle('on', open);
+        if (open) { menu.classList.remove('down'); if (menu.getBoundingClientRect().top < 8) menu.classList.add('down'); } // не помещается сверху — раскрываем вниз
+      } }, label, el('span', { class: 'dd-tri' }));
+      menus.push({ menu, btn }); return { menu, btn };
+    };
+    const closeMenus = () => menus.forEach((m) => { m.menu.hidden = true; m.btn.classList.remove('on'); });
+    const tplMenu = dropdown('Шаблоны', GRAPH_TPL.map(([name, code]) => el('button', { class: 'tpl', onclick: () => { closeMenus(); insTpl(code); } }, el('b', {}, name), el('span', {}, prettyExpr(code)))), 'tpls');
+    const axMenu = dropdown('Оси', [el('div', { class: 'axrow' }, el('span', {}, 'x от'), xmin, el('span', {}, 'до'), xmax), el('div', { class: 'axrow' }, el('span', {}, 'y от'), ymin, el('span', {}, 'до'), ymax)], 'axes');
     const p = floatingPanel(it ? it.x : wx, it ? worldBox(it)[3] : wy, [
       el('div', { class: 'panel-title' }, it ? 'Изменить график' : 'Новый график'),
-      el('div', { class: 'small muted' }, 'Несколько функций — через «;» или с новой строки (Shift+Enter). Примеры: 2x+1; sin(x); |x-1|; sqrt(x); 1/x; x^3-3x'),
-      ta, msg,
-      el('div', { class: 'row' }, 'x от', xmin, 'до', xmax), el('div', { class: 'row' }, 'y от', ymin, 'до', ymax),
-      el('div', { class: 'row end' }, el('button', { class: 'btn', onclick: () => closeEditors(false) }, 'Отмена'), el('button', { class: 'btn primary', onclick: commit }, it ? 'Сохранить' : 'Вставить')),
-    ]);
+      ta, msg, tplMenu.menu, axMenu.menu,
+      el('div', { class: 'gfoot' }, tplMenu.btn, axMenu.btn, el('div', { class: 'grow' }),
+        el('button', { class: 'btn', onclick: () => closeEditors(false) }, 'Отмена'), el('button', { class: 'btn primary', onclick: commit }, it ? 'Сохранить' : 'Вставить')),
+    ], 'gpanel');
+    p.addEventListener('pointerdown', (e) => { if (!menus.some((m) => m.menu.contains(e.target) || m.btn.contains(e.target))) closeMenus(); });
     check(); ta.focus(); ta.select();
     ta.addEventListener('input', () => pvMaybeSend());
     editorOpen = { close() { p.remove(); },
