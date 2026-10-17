@@ -23,7 +23,8 @@ class Link {
     this.hub = hub; this.pipe = pipe; this.kind = kind; this.alive = true;
     this.chunks = new Map();
     this.remote = null; // hello собеседника
-    pipe.onmessage = (d) => this.receive(d);
+    this.lastRx = Date.now(); this.pings = false; this.remoteHidden = false; // проверка «жив ли канал»
+    pipe.onmessage = (d) => { this.lastRx = Date.now(); this.receive(d); };
     pipe.onclose = () => this.closed();
   }
   start() {
@@ -49,6 +50,7 @@ class Link {
   receive(d) {
     if (typeof d === 'string') {
       let o; try { o = JSON.parse(d); } catch { return; }
+      if (o.t === 'ping') { this.pings = true; this.remoteHidden = !!o.hid; return; }
       if (o.t === 'hello') { this.remote = o; this.hub.emitStatus(); }
       else if (!this.hub.isPrimary(this)) return;
       this.hub.onEphemeral(o, this);
@@ -97,6 +99,28 @@ export class Hub {
     doc.on('update', (u, origin) => {
       for (const l of this.links) if (l !== origin) l.sendBin(T_UPDATE, u);
     });
+    // Связь «подвисла» (пропал Wi-Fi, уснул ноутбук): канал вроде открыт, но ничего не доходит.
+    // Каждые 2 с шлём «я тут»; молчит дольше 6 с — закрываем канал и сразу переподключаемся.
+    // У собеседника со старой версией (не шлёт «я тут») ничего не закрываем. Вкладка в фоне шлёт реже — ей даём 90 с.
+    setInterval(() => {
+      const hid = typeof document !== 'undefined' && document.hidden;
+      for (const l of [...this.links]) {
+        if (!l.alive || l.kind === 'tab') continue;
+        l.sendJSON({ t: 'ping', hid });
+        if (l.pings && Date.now() - l.lastRx > (l.remoteHidden ? 90000 : 6000)) { console.warn('link silent, reconnecting', l.kind); l.close(); }
+      }
+    }, 2000);
+    if (typeof window !== 'undefined') {
+      const wake = () => this.wake();
+      window.addEventListener('online', wake);
+      document.addEventListener('visibilitychange', () => { if (!document.hidden) wake(); });
+    }
+  }
+  // Интернет вернулся или вкладку снова открыли: если прямой связи нет — пробуем сразу, не ждём таймера
+  wake() {
+    if (!this.room || this.stopped) return;
+    if ([...this.links].some((l) => l.alive && l.kind === 'peer')) return;
+    clearTimeout(this.retryTimer); this.tryHost();
   }
   on(ev, f) { this.listeners[ev].push(f); }
   onEphemeral(o, link) { for (const f of this.listeners.ephemeral) f(o, link); }
@@ -147,13 +171,18 @@ export class Hub {
       const tr = joinRoom({ appId: 'doska-tutor-board-v1', password: 'doska:' + room, rtcConfig: { iceServers: ICE_SERVERS }, relayConfig: { redundancy: 8, warnOnRelayFailure: false } }, 'r-' + room);
       this.tr = tr;
       const act = tr.makeAction('d');
-      const pipes = new Map();
-      tr.onPeerJoin = (pid) => {
+      const pipes = new Map(), links = new Map();
+      const join = (pid) => {
         const pipe = { send: (d) => { act.send(d, { target: pid }).catch(() => {}); }, close: () => {}, onmessage: null, onclose: null };
-        pipes.set(pid, pipe); this.addPipe(pipe, 'nostr');
+        pipes.set(pid, pipe); links.set(pid, this.addPipe(pipe, 'nostr'));
       };
-      tr.onPeerLeave = (pid) => { const pp = pipes.get(pid); pipes.delete(pid); pp?.onclose?.(); };
-      act.onMessage = (data, ctx) => pipes.get(ctx.peerId)?.onmessage?.(data);
+      tr.onPeerJoin = join;
+      tr.onPeerLeave = (pid) => { const pp = pipes.get(pid); pipes.delete(pid); links.delete(pid); pp?.onclose?.(); };
+      act.onMessage = (data, ctx) => {
+        const l = links.get(ctx.peerId);
+        if (!l || !l.alive) join(ctx.peerId); // канал закрыли из-за тишины, а собеседник снова на связи
+        pipes.get(ctx.peerId)?.onmessage?.(data);
+      };
     } catch (e) { console.warn('nostr signalling failed', e); }
   }
   stopPeer() { this.stopped = true; this.peer?.destroy(); this.peer = null; this.setPeer('off'); }
@@ -172,8 +201,11 @@ export class Hub {
     conn.on('error', () => pipe.onclose?.());
     // если ICE оборвался, PeerJS может не прислать close — следим сами
     const pc = conn.peerConnection;
+    let dcT = 0;
     if (pc) pc.addEventListener('iceconnectionstatechange', () => {
+      clearTimeout(dcT);
       if (['failed', 'closed'].includes(pc.iceConnectionState)) pipe.onclose?.();
+      else if (pc.iceConnectionState === 'disconnected') dcT = setTimeout(() => { if (pc.iceConnectionState === 'disconnected') { try { conn.close(); } catch {} pipe.onclose?.(); } }, 4000);
     });
     if (conn.dataChannel) conn.dataChannel.binaryType = 'arraybuffer';
     return pipe;
@@ -205,6 +237,7 @@ export class Hub {
   }
   tryGuest() {
     if (this.stopped) return;
+    if (this.peer && !this.peer.destroyed) try { this.peer.destroy(); } catch {}
     const peer = new Peer(this.peerOpts());
     this.peer = peer;
     peer.on('open', () => {
