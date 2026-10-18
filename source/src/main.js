@@ -1206,7 +1206,8 @@ function startBoard(room) {
       x: pt[0], y: pt[1], p: pt[2], t: now0, device: e.pointerType === 'pen' ? 'pen' : 'mouse',
       steady: prefs.steady, zoom: () => S.view.z, continueKeys: rejoin ? L.keys : null,
     });
-    const g = { sid: uid(), kind, v: 2, color, size, thin: kind !== 'pen' ? 0 : (real ? prefs.thin : 0), prevId: rejoin ? L.id : null, cheapEnd: true };
+    // толщина линии всегда одна и та же, нажим пера её не меняет (как маркер на доске)
+    const g = { sid: uid(), kind, v: 2, color, size, thin: 0, prevId: rejoin ? L.id : null, cheapEnd: true };
     if (g.prevId) { S.hidden.add(g.prevId); STATS.rejoin = (STATS.rejoin || 0) + 1; }
     liveSend(g, sb.keys);
     g.move = (p, ev) => {
