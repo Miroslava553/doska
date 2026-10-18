@@ -2345,7 +2345,7 @@ function startBoard(room) {
   function updateSelBar() {
     const its = [...S.sel].map((id) => items.get(id)).filter(Boolean);
     if (!its.length || editorOpen) { selBar.hidden = true; selBar.dataset.key = ''; return; }
-    const key = (S.shapeEdit || '') + its.map((i) => `${i.id}${i.locked}${i.fill}${i.dash}${i.kind}${i.flip}${i.w}${i.h}${i.pts ? i.pts.map((q) => q[0].toFixed(1) + ',' + q[1].toFixed(1)).join(';') : ''}`).join('|');
+    const key = (S.shapeEdit || '') + its.map((i) => `${i.id}${i.locked}${i.fill}${i.dash}${i.kind}${i.flip}${i.w}${i.h}${i.type === 'poly' && Array.isArray(i.pts) ? i.pts.map((q) => (+q[0]).toFixed(1) + ',' + (+q[1]).toFixed(1)).join(';') : i.pts ? i.pts.length : ''}`).join('|');
     if ((selBar.dataset.key === key || selBar._dragging) && !selBar.hidden) { selBar._sync?.(); placeSelBar(); return; } // ничего не поменялось — не трогаем (не мигает)
     selBar.dataset.key = key; selBar.innerHTML = '';
     selBar._sync = null;
@@ -2982,8 +2982,8 @@ function startBoard(room) {
         ['Стереометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'solid')]] },
     more: { tools: ['note', 'image'], name: 'Ещё', sections: [['', ['note', 'image']]] },
   };
-  // Ручка и ластик — в середине панели (ближе к центру экрана), рядом выделение и ладонь; цвета — справа
-  const BAR = ['hl', 'dpen', '@shapes', '|', 'pen', 'eraser', 'select', 'hand', '|', 'text', 'tex', 'graph', 'image'];
+  // Порядок: маркер, пунктир, ладонь | ручка, ластик, выделение, фигуры | текст, формула, график, картинка | цвета
+  const BAR = ['hl', 'dpen', 'hand', '|', 'pen', 'eraser', 'select', '@shapes', '|', 'text', 'tex', 'graph', 'image'];
   const toolDef = (id) => TOOLS.find((t) => t.id === id);
   function toolIcon(id) {
     if (id === 'eraser' && prefs.eraserPrecise) return 'eraserPrecise';
@@ -3228,11 +3228,15 @@ function startBoard(room) {
     const next = d > 0 ? ZSTEPS.find((v) => v > z * 1.001) ?? 12 : [...ZSTEPS].reverse().find((v) => v < z / 1.001) ?? 0.1;
     zoomAt(W / 2, H / 2, next / z);
   }
-  // Снизу справа: отменить / вернуть и масштаб
-  const zoomBar = el('div', { class: 'bar zoombar' },
+  // Отменить / вернуть — сверху, сразу справа от названия и листов. На узком экране, где сверху нет места, — снизу у масштаба.
+  const urBtns = [
     el('button', { class: 'tbtn', title: 'Отменить своё действие — Ctrl+Z', onclick: doUndo }, icon('undo')),
-    el('button', { class: 'tbtn', title: 'Вернуть — Ctrl+Shift+Z или Ctrl+Y', onclick: doRedo }, icon('redo')),
-    el('div', { class: 'sep' }),
+    el('button', { class: 'tbtn', title: 'Вернуть — Ctrl+Shift+Z или Ctrl+Y', onclick: doRedo }, icon('redo'))];
+  const urSep = el('div', { class: 'sep' });
+  const urBar = el('div', { class: 'bar urbar' }, ...urBtns);
+  app.append(urBar);
+  // Снизу справа — масштаб
+  const zoomBar = el('div', { class: 'bar zoombar' },
     el('button', { class: 'tbtn', title: 'Отдалить (Ctrl −)', onclick: () => zoomStep(-1) }, icon('minus')),
     zoomBtn,
     el('button', { class: 'tbtn', title: 'Приблизить (Ctrl +)', onclick: () => zoomStep(1) }, icon('plus')));
@@ -3241,9 +3245,24 @@ function startBoard(room) {
   // Панель инструментов всегда строго по центру. Строку выбираем только по ширине окна
   // (левая и правая панели имеют фиксированную наибольшую ширину), поэтому при смене инструмента,
   // названия или статуса она не сдвигается ни на пиксель.
-  const LEFT_MAX = 400, RIGHT_W = 430, BAR_LIFT = 30;
+  const LEFT_MAX = 490, RIGHT_W = 430, BAR_LIFT = 30; // слева: название, листы и стрелки отмены
   // Панель: сверху (по умолчанию), снизу или справа — выбирается в меню
+  function placeUndo() {
+    const tl = topLeft.getBoundingClientRect(), tr = topRight.getBoundingClientRect();
+    const urW = 2 * 36 + 10; // две кнопки и поля
+    const fitsTop = tl.right + 8 + urW + 8 <= tr.left;
+    if (fitsTop) {
+      if (urBtns[0].parentNode !== urBar) urBar.append(...urBtns);
+      urSep.remove(); urBar.hidden = false;
+      urBar.style.left = Math.round(tl.right + 8) + 'px'; urBar.style.top = Math.round(tl.top) + 'px'; urBar.style.height = Math.round(tl.height) + 'px';
+    } else {
+      if (urBtns[0].parentNode !== zoomBar) zoomBar.prepend(...urBtns, urSep);
+      urBar.hidden = true;
+    }
+  }
+  new ResizeObserver(() => placeUndo()).observe(topLeft);
   function layoutBars() {
+    placeUndo();
     const pos = prefs.barPos || 'top';
     toolbar.classList.toggle('vert', pos === 'right' || pos === 'left');
     document.body.dataset.bar = pos;

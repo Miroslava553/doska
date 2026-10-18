@@ -379,3 +379,5 @@ kbd { font: 12px ui-monospace, Consolas, monospace; background: #f3f4f6; border:
 .sz-colors { display: flex; justify-content: space-between; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line, #eceef1); }
 .sz-colors .cbtn { width: 34px; height: 34px; margin: 0; }
 .zoombar .sep { margin: 0 3px; }
+.urbar { padding: 0 4px; gap: 2px; }
+.urbar[hidden] { display: none; }
