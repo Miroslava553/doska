@@ -3,7 +3,7 @@ import { IndexeddbPersistence } from 'y-indexeddb';
 import { Hub, ManualConnect } from './sync.js';
 import {
   decodePts, encodePts, strokeOptions, outlinePath, paintInk, localBox, worldBox, geomWorldBox, itemTransform, hitItem, distSeg,
-  drawItem, drawBackground, setAsyncLoad, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf,
+  drawItem, drawBackground, setAsyncLoad, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf, bakeShape, SCALE_BAKED,
 } from './render.js';
 import { compileMany } from './expr.js';
 import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, solidEdges, regularSolid } from './solid.js';
@@ -75,9 +75,9 @@ const TOOLS = [
   { id: 'poly', key: 'Y', name: 'Многоугольник по точкам', hint: 'щелчки по вершинам; замкнуть — щелчок в первую точку, закончить ломаную — Enter или двойной щелчок' },
   { sep: true },
   { id: 'text', key: 'T', name: 'Текст' },
-  { id: 'tex', key: 'F', name: 'Формула (LaTeX)' },
+  { id: 'tex', key: 'F', name: 'Формула' },
   { id: 'graph', key: 'G', name: 'График функции' },
-  { id: 'note', key: 'N', name: 'Стикер' },
+  { id: 'note', key: '', name: 'Стикер' }, // стикеры убраны из панели; старые на досках по-прежнему видны и правятся
   { id: 'image', key: 'I', name: 'Картинка или PDF' },
 ];
 for (const [k, f] of Object.entries(FIGS)) TOOLS.push({ id: 'fig:' + k, name: f.name, fig: k, g: f.g, hidden: true });
@@ -145,6 +145,57 @@ function undoBar(text, onCommit, onUndo, seconds = 6) {
 
 // ============ стартовый экран / комната ============
 function roomFromHash() { const m = location.hash.match(/r=([a-z0-9-]+)/i); return m ? normalizeCode(m[1]) : null; }
+// Статус «репетитор / ученик». Видно на доске и на главном экране.
+// Сменить можно только на главном экране и не чаще раза в сутки (первые 2 минуты после выбора — свободно).
+const ROLE_GRACE = 2 * 60 * 1000;
+const ROLE_COOLDOWN = 24 * 60 * 60 * 1000;
+const ROLE_NAMES = { tutor: 'Репетитор', student: 'Ученик' };
+// roleFirst — когда выбрали впервые; roleAt — когда последний раз меняли (после первых 2 минут).
+const roleNextAt = () => !prefs.role || Date.now() - (prefs.roleFirst || 0) < ROLE_GRACE ? 0 : (prefs.roleAt || 0) + ROLE_COOLDOWN;
+const roleCanChange = () => Date.now() >= roleNextAt();
+function setRole(r) {
+  if (!ROLE_NAMES[r] || r === prefs.role) return false;
+  if (!prefs.role) { prefs.roleFirst = Date.now(); prefs.roleAt = 0; }
+  else if (!roleCanChange()) return false;
+  else if (Date.now() - (prefs.roleFirst || 0) >= ROLE_GRACE) prefs.roleAt = Date.now();
+  prefs.role = r; savePrefs(); return true;
+}
+// Окно выбора статуса. Если статус уже есть — это окно смены (с ограничением раз в сутки).
+function roleDialog(onDone) {
+  const had = !!prefs.role, can = roleCanChange();
+  const close = () => m.remove();
+  const pick = (r) => { if (r === prefs.role) { close(); return; } if (setRole(r)) { close(); onDone?.(r); } };
+  const btn = (id, icon) => el('button', { class: 'role-btn' + (prefs.role === id ? ' on' : ''), disabled: had && !can && prefs.role !== id, onclick: () => pick(id) },
+    el('span', { class: 'ic', html: icon }), ROLE_NAMES[id]);
+  const when = () => { const d = new Date(roleNextAt()), t = d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    return (d.toDateString() === new Date().toDateString() ? 'сегодня' : 'завтра') + ' в ' + t; };
+  const m = el('div', { class: 'modal', onpointerdown: (e) => { if (had && e.target === m) close(); } },
+    el('div', { class: 'panel dialog role-dialog' },
+      el('div', { class: 'dialog-h' }, el('b', {}, had ? 'Ваш статус' : 'Кто вы?')),
+      el('div', { class: 'role-btns' }, btn('tutor', ICONS.graph), btn('student', ICONS.pen)),
+      had && !can ? el('div', { class: 'small muted role-note' }, 'Сменить можно ' + when()) : null,
+      had ? el('div', { class: 'role-foot' }, el('button', { class: 'btn', onclick: close }, 'Закрыть')) : null));
+  document.body.append(m);
+  return m;
+}
+// На главном экране: кнопки выбора, если статуса нет; иначе — статус (нажатие открывает смену)
+function roleBox(onPick) {
+  if (prefs.role) return el('button', { class: 'role-pill click', onclick: () => roleDialog(onPick) }, ROLE_NAMES[prefs.role]);
+  return el('div', { class: 'role-choose' }, el('span', { class: 'muted' }, 'Кто вы?'),
+    ...Object.entries(ROLE_NAMES).map(([id, label]) => el('button', { class: 'chip', onclick: () => { if (setRole(id)) onPick?.(); } }, label)));
+}
+// Анонимные предложения: Яндекс Форма во всплывающем окне. Имя и статус не передаются.
+const FEEDBACK_URL = 'https://forms.yandex.ru/u/6ad4be566d2d73ec38a5a6c9/';
+function feedbackDialog() {
+  const close = () => m.remove();
+  const src = FEEDBACK_URL ? FEEDBACK_URL + (FEEDBACK_URL.includes('?') ? '&' : '?') + 'iframe=1' : '';
+  const m = el('div', { class: 'modal', onpointerdown: (e) => { if (e.target === m) close(); } },
+    el('div', { class: 'panel dialog fb-dialog' },
+      el('div', { class: 'dialog-h' }, el('b', {}, 'Предложить улучшение'), el('button', { class: 'ibtn fb-x', title: 'Закрыть', onclick: close }, '×')),
+      src ? el('iframe', { class: 'fb-frame', src, title: 'Форма' })
+        : el('div', { class: 'fb-frame fb-empty muted' }, 'Здесь будет форма')));
+  document.body.append(m);
+}
 const room = roomFromHash();
 if (!room) showStart(); else startBoard(room);
 
@@ -192,8 +243,11 @@ function showStart() {
   }
   search.addEventListener('input', renderList);
   codeIn.addEventListener('input', () => { err.textContent = ''; });
+  const roleSlot = el('div', { class: 'role-slot' });
+  const paintRole = () => { roleSlot.innerHTML = ''; roleSlot.append(roleBox(paintRole)); };
+  paintRole();
   const card = el('div', { class: 'start-card' },
-    el('h1', {}, 'Доска для занятий'),
+    el('div', { class: 'start-head' }, el('h1', {}, 'Доска для занятий'), roleSlot),
     nameIn,
     el('div', { class: 'srow' }, titleIn, el('button', { class: 'btn primary', onclick: create }, 'Создать')),
     el('div', { class: 'srow' }, codeIn, el('button', { class: 'btn', onclick: join }, 'Подключиться')),
@@ -1205,7 +1259,7 @@ function startBoard(room) {
     g.cancel = () => { stopHold(); if (g.prevId) S.hidden.delete(g.prevId); liveEnd(g); };
     return g;
   }
-  const HOLD_MS = 550;
+  const HOLD_MS = 400;
 
   // ластик: целиком (по умолчанию) или точный (разрезает штрихи)
   // Ластик: целиком (по умолчанию) или точный — режет и линии, и фигуры ровно по своему кругу.
@@ -1705,7 +1759,7 @@ function startBoard(room) {
           end() {
             const ov = S.ov; S.ov = null; updateCursor();
             if (Math.abs(ov.kx - 1) < 1e-3 && Math.abs(ov.ky - 1) < 1e-3) return;
-            act(() => { for (const id of ov.ids) { const it = items.get(id); if (it) setFields(id, bakeStretch(it, ov)); } });
+            act(() => { for (const id of ov.ids) { const it = items.get(id); if (it) setFields(id, SCALE_BAKED.has(it.type) ? bakeShape(it, ov.kx, ov.ky, ov.ax, ov.ay) : bakeStretch(it, ov)); } });
           },
           cancel() { S.ov = null; },
         };
@@ -1721,7 +1775,7 @@ function startBoard(room) {
           end() {
             const ov = S.ov; S.ov = null; updateCursor();
             if (Math.abs(ov.k - 1) < 1e-3) return;
-            act(() => { for (const id of ov.ids) { const it = items.get(id); if (!it) continue; const t = itemTransform(it, ov); setFields(id, { x: t.x, y: t.y, s: t.s }); } });
+            act(() => { for (const id of ov.ids) { const it = items.get(id); if (!it) continue; if (SCALE_BAKED.has(it.type)) { setFields(id, bakeShape(it, ov.k, ov.k, ov.ax, ov.ay)); continue; } const t = itemTransform(it, ov); setFields(id, { x: t.x, y: t.y, s: t.s }); } });
           },
           cancel() { S.ov = null; },
         };
@@ -2058,52 +2112,142 @@ function startBoard(room) {
     let nx = -by / L, ny = bx / L; // нормаль к основанию в сторону вершины
     const side = (A[0] - mx) * nx + (A[1] - my) * ny; if (side < 0) { nx = -nx; ny = -ny; }
     const hgt = mode === 'eq' ? L * SQ3 : Math.abs(side);
+    if (Math.hypot(P[best][0] - (mx + nx * hgt), P[best][1] - (my + ny * hgt)) < 0.75) return null;
     P[best] = [mx + nx * hgt, my + ny * hgt];
     let x0 = Infinity, y0 = Infinity; for (const [x, y] of P) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); }
     const s = it.s || 1;
     return { x: it.x + x0 * s, y: it.y + y0 * s, pts: P.map(([x, y]) => [x - x0, y - y0]) };
   }
-  // Поля, превращающие объект в правильный. undefined — к объекту неприменимо, null — он уже правильный.
-  function regularFields(it, probe = false) {
+  // «Выровнять»: каждая фигура возвращается к своим свойствам — параллелограмм снова параллелограмм,
+  // прямоугольник — прямоугольник, квадрат — квадрат и т. д. Меняется как можно меньше (лишние вершины не двигаются).
+  // undefined — к объекту неприменимо, null — он уже ровный.
+  const FIX_NAME = { rect: 'прямоугольник', square: 'квадрат', parallelogram: 'параллелограмм', rhombus: 'ромб', trapezoid: 'трапеция',
+    triangle: 'равнобедренный треугольник', eqtriangle: 'равносторонний треугольник', rtriangle: 'прямоугольный треугольник',
+    pentagon: 'правильный пятиугольник', hexagon: 'правильный шестиугольник', inscribed: 'равносторонний треугольник', circumscribed: 'равносторонний треугольник',
+    circle: 'окружность', ngon: 'правильный многоугольник', solid: 'ровное тело' };
+  function regularKind(it) {
+    if (it.locked) return null;
+    if (it.type === 'ellipse') return it.center ? 'circle' : null;
+    if (it.type === 'fig' && SOLID_KINDS.has(it.kind)) return 'solid';
+    if (it.type === 'fig') return FIGS[it.kind]?.aspect ? it.kind : null; // у остальных пропорции любые — фигура всегда «та»
+    if (it.type === 'poly' && it.closed && it.pts.length >= 3) {
+      const n = it.pts.length, fk = it.fk;
+      const quad = { rect: 1, square: 1, parallelogram: 1, rhombus: 1, trapezoid: 1 }, tri = { triangle: 1, eqtriangle: 1, rtriangle: 1, inscribed: 1, circumscribed: 1 };
+      if (fk && quad[fk] && n === 4) return fk;
+      if (fk && tri[fk] && n === 3) return fk;
+      if ((fk === 'pentagon' && n === 5) || (fk === 'hexagon' && n === 6)) return fk;
+      return n === 3 ? 'eqtriangle' : 'ngon'; // свой многоугольник — правильный
+    }
+    return null;
+  }
+  const V2 = { sub: (a, b) => [a[0] - b[0], a[1] - b[1]], add: (a, b) => [a[0] + b[0], a[1] + b[1]], mul: (a, k) => [a[0] * k, a[1] * k], dot: (a, b) => a[0] * b[0] + a[1] * b[1], len: (a) => Math.hypot(a[0], a[1]) };
+  // из нескольких вариантов выбираем тот, где вершины сдвинулись меньше всего
+  const nearest = (P, cands) => { let best = null, bd = Infinity; for (const Q of cands) { if (!Q) continue; let d = 0; for (let i = 0; i < P.length; i++) d += (Q[i][0] - P[i][0]) ** 2 + (Q[i][1] - P[i][1]) ** 2; if (d < bd) { bd = d; best = Q; } } return best; };
+  function fixQuad(P, kind) {
+    const { sub, add, mul, dot, len } = V2;
+    const at = (i) => P[(i + 4) % 4];
+    const put = (pairs) => { const Q = P.map((p) => p.slice()); for (const [i, q] of pairs) Q[(i + 4) % 4] = q; return Q; };
+    const C = [];
+    if (kind === 'parallelogram') for (let i = 0; i < 4; i++) C.push(put([[i, add(at(i - 1), sub(at(i + 1), at(i + 2)))]]));
+    if (kind === 'rect' || kind === 'square') {
+      for (let i = 0; i < 4; i++) {
+        const A = at(i), B = at(i + 1), u = sub(B, A), L = len(u) || 1; let nrm = [-u[1] / L, u[0] / L];
+        const hC = dot(sub(at(i + 2), A), nrm), hD = dot(sub(at(i + 3), A), nrm);
+        let h = (hC + hD) / 2; if (h < 0) { nrm = mul(nrm, -1); h = -h; }
+        if (kind === 'square') h = L;
+        C.push(put([[i + 2, add(B, mul(nrm, h))], [i + 3, add(A, mul(nrm, h))]]));
+      }
+    }
+    if (kind === 'rhombus') {
+      for (let i = 0; i < 2; i++) {
+        const A = at(i), B = at(i + 2), m = mul(add(A, B), 0.5), u = sub(B, A), L = len(u) || 1, nrm = [-u[1] / L, u[0] / L];
+        const t1 = dot(sub(at(i + 1), m), nrm), t3 = dot(sub(at(i + 3), m), nrm);
+        const t = (Math.abs(t1) + Math.abs(t3)) / 2, sg = t1 >= 0 ? 1 : -1;
+        C.push(put([[i + 1, add(m, mul(nrm, sg * t))], [i + 3, add(m, mul(nrm, -sg * t))]]));
+      }
+    }
+    if (kind === 'trapezoid') {
+      // как в списке фигур: равнобокая трапеция с ровными (горизонтальными) основаниями, большее — снизу.
+      // Основания — та пара сторон, что ближе к параллельным; их длины и высота сохраняются, центр остаётся на месте.
+      // Если трапецию нарочно повернули на 90°/180°, так и остаётся: направление основания округляется до четверти оборота.
+      const dirOf = (i) => { const u = sub(at(i + 1), at(i)); const L = len(u) || 1; return [u[0] / L, u[1] / L]; };
+      const par = (i) => Math.abs(dirOf(i)[0] * dirOf(i + 2)[1] - dirOf(i)[1] * dirOf(i + 2)[0]); // 0 — параллельны
+      const i0 = par(0) <= par(1) + 1e-9 ? 0 : 1;
+      const iB = len(sub(at(i0 + 1), at(i0))) >= len(sub(at(i0 + 3), at(i0 + 2))) ? i0 : i0 + 2; // большая сторона — основание
+      const A = at(iB), B = at(iB + 1), Cc = at(iB + 2), D = at(iB + 3);
+      const L = len(sub(B, A)), e0 = dirOf(iB);
+      const q = Math.round(Math.atan2(e0[1], e0[0]) / (Math.PI / 2)) * (Math.PI / 2);
+      const e = [Math.round(Math.cos(q)), Math.round(Math.sin(q))];
+      const mB = mul(add(A, B), 0.5), mT = mul(add(Cc, D), 0.5);
+      let nrm = [-e[1], e[0]]; if (dot(sub(mT, mB), nrm) < 0) nrm = mul(nrm, -1);
+      const hgt = Math.max(4, Math.abs(dot(sub(mT, mB), [-e0[1], e0[0]])));
+      const l = Math.min(len(sub(Cc, D)), L * 0.96) / 2, c0 = mul(add(mB, mT), 0.5);
+      const bM = add(c0, mul(nrm, -hgt / 2)), tM = add(c0, mul(nrm, hgt / 2));
+      C.push(put([[iB, add(bM, mul(e, -L / 2))], [iB + 1, add(bM, mul(e, L / 2))], [iB + 2, add(tM, mul(e, l))], [iB + 3, add(tM, mul(e, -l))]]));
+    }
+    return nearest(P, C);
+  }
+  function fixRightTri(P) {
+    const { sub, add, mul, dot, len } = V2; const C = [];
+    for (let v = 0; v < 3; v++) for (const [a, b] of [[1, 2], [2, 1]]) {
+      const V = P[v], A = P[(v + a) % 3], B = P[(v + b) % 3], u = sub(A, V), L = len(u) || 1; const nrm = [-u[1] / L, u[0] / L];
+      const t = dot(sub(B, V), nrm); const Q = P.map((p) => p.slice()); Q[(v + b) % 3] = add(V, mul(nrm, t)); C.push(Q);
+    }
+    return nearest(P, C);
+  }
+  function regularNgon(P) {
+    const n = P.length;
+    const cx = P.reduce((a, p) => a + p[0], 0) / n, cy = P.reduce((a, p) => a + p[1], 0) / n;
+    let area = 0; for (let i = 0; i < n; i++) { const a = P[i], b = P[(i + 1) % n]; area += a[0] * b[1] - b[0] * a[1]; }
+    const dir = area >= 0 ? 1 : -1; const a0 = Math.atan2(P[0][1] - cy, P[0][0] - cx);
+    const ext = (pts) => { const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]); return [Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)]; };
+    const U = P.map((_, k) => [Math.cos(a0 + (dir * 2 * Math.PI * k) / n), Math.sin(a0 + (dir * 2 * Math.PI * k) / n)]);
+    const [W0, H0] = ext(P), [wu, hu] = ext(U);
+    const r = Math.min(W0 / (wu || 1), H0 / (hu || 1)) || 1; // вписываем в меньшую сторону рамки
+    return U.map(([ux, uy]) => [cx + r * ux, cy + r * uy]);
+  }
+  function regularFields(it) {
+    const kind = regularKind(it); if (!kind) return undefined;
     const s = it.s || 1;
-    const fit = (aspect, extra = {}) => {
+    const fit = (aspect) => {
       let w = it.w, h = it.h;
       if (w * aspect <= h) h = w * aspect; else w = h / aspect; // меньшая сторона остаётся
-      if (Math.abs(w - it.w) < 0.5 && Math.abs(h - it.h) < 0.5 && !Object.keys(extra).length) return null;
-      return { x: it.x + ((it.w - w) / 2) * s, y: it.y + ((it.h - h) / 2) * s, w, h, ...extra };
+      if (Math.abs(w - it.w) < 0.5 && Math.abs(h - it.h) < 0.5) return null;
+      return { x: it.x + ((it.w - w) / 2) * s, y: it.y + ((it.h - h) / 2) * s, w, h };
     };
-    if (it.locked) return undefined;
-    if (it.type === 'rect' || it.type === 'ellipse') return fit(1);
-    if (it.type === 'fig' && SOLID_KINDS.has(it.kind)) {
-      if (!it.m) return fit(it.h / it.w > 0 ? FIGS[it.kind]?.aspect || 1 : 1);
-      return probe ? {} : regularSolid(it);
+    if (kind === 'circle') return fit(1);
+    if (kind === 'solid') return it.m ? regularSolid(it) : fit(FIGS[it.kind]?.aspect || 1);
+    if (it.type === 'fig') return fit(FIGS[it.kind].aspect);
+    // многоугольник
+    const P = it.pts.map(([x, y]) => [x, y]);
+    let Q;
+    if (kind === 'triangle' || kind === 'eqtriangle' || kind === 'inscribed' || kind === 'circumscribed') return triangleFix(it, kind === 'triangle' ? 'iso' : 'eq');
+    else if (kind === 'rtriangle') Q = fixRightTri(P);
+    else if (FIX_NAME[kind] && P.length === 4 && kind !== 'ngon') Q = fixQuad(P, kind);
+    else Q = regularNgon(P);
+    if (!Q || Q.every((q, k) => Math.hypot(q[0] - P[k][0], q[1] - P[k][1]) < 0.75)) return null;
+    let x0 = Infinity, y0 = Infinity; for (const [x, y] of Q) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); }
+    return { x: it.x + x0 * s, y: it.y + y0 * s, pts: Q.map(([x, y]) => [x - x0, y - y0]) };
+  }
+  // Зеркало слева направо: фигура остаётся на месте, меняется только сторона. null — отражать нечего (симметрична).
+  function mirrorFields(it) {
+    if (it.locked) return null;
+    const flipX = (xs) => { const a = Math.min(...xs), b = Math.max(...xs); return (x) => a + b - x; };
+    if (it.type === 'poly') {
+      const f = flipX(it.pts.map((p) => p[0])); const Q = it.pts.map(([x, y]) => [f(x), y]);
+      if (Q.every((q) => it.pts.some((p) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 0.75))) return null; // симметрична — отражать нечего
+      return { pts: Q };
     }
-    if (it.type === 'fig') {
-      if (it.kind === 'triangle') return fit(SQ3, { kind: 'eqtriangle' }); // «правильный» треугольник — равносторонний
-      return fit(FIGS[it.kind]?.aspect || 1);
+    if (it.type === 'line' || it.type === 'arrow') { const f = flipX([it.x1, it.x2]); return it.x1 === it.x2 ? null : { x1: f(it.x1), x2: f(it.x2) }; }
+    if (it.type === 'fig' && !SOLID_KINDS.has(it.kind) && FIGS[it.kind]) {
+      if (['square', 'rhombus', 'triangle', 'eqtriangle', 'pentagon', 'hexagon', 'inscribed', 'circumscribed', 'trapezoid', 'axes'].includes(it.kind)) return null;
+      return { flip: !it.flip, ...(it.rot ? { rot: -it.rot } : {}) };
     }
-    if (it.type === 'poly' && it.closed && it.pts.length >= 3) {
-      if (probe) return {};
-      const P = it.pts; const n = P.length;
-      if (n === 3) {
-        const d = (i) => Math.hypot(P[i][0] - P[(i + 1) % 3][0], P[i][1] - P[(i + 1) % 3][1]);
-        if (Math.max(d(0), d(1), d(2)) - Math.min(d(0), d(1), d(2)) < 0.75) return null;
-        return triangleFix(it, 'eq');
-      }
-      // правильный n-угольник: центр и порядок вершин сохраняются, радиус — по меньшей стороне рамки
-      const cx = P.reduce((a, p) => a + p[0], 0) / n, cy = P.reduce((a, p) => a + p[1], 0) / n;
-      let area = 0; for (let i = 0; i < n; i++) { const a = P[i], b = P[(i + 1) % n]; area += a[0] * b[1] - b[0] * a[1]; }
-      const dir = area >= 0 ? 1 : -1; const a0 = Math.atan2(P[0][1] - cy, P[0][0] - cx);
-      const ext = (pts) => { const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]); return [Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)]; };
-      const U = P.map((_, k) => [Math.cos(a0 + (dir * 2 * Math.PI * k) / n), Math.sin(a0 + (dir * 2 * Math.PI * k) / n)]);
-      const [W0, H0] = ext(P), [wu, hu] = ext(U);
-      const r = Math.min(W0 / (wu || 1), H0 / (hu || 1)) || 1; // вписываем в меньшую сторону рамки
-      const Q = U.map(([ux, uy]) => [cx + r * ux, cy + r * uy]);
-      if (Q.every((q, k) => Math.hypot(q[0] - P[k][0], q[1] - P[k][1]) < 0.75)) return null;
-      let x0 = Infinity, y0 = Infinity; for (const [x, y] of Q) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); }
-      return { x: it.x + x0 * s, y: it.y + y0 * s, pts: Q.map(([x, y]) => [x - x0, y - y0]) };
-    }
-    return undefined;
+    return null;
+  }
+  function mirrorSel() {
+    const todo = [...S.sel].map((id) => items.get(id)).filter(Boolean).map((i) => [i, mirrorFields(i)]).filter(([, f]) => f);
+    if (todo.length) act(() => { for (const [i, f] of todo) setFields(i.id, f); });
   }
   function makeRegularSel() {
     const its = [...S.sel].map((id) => items.get(id)).filter(Boolean);
@@ -2140,7 +2284,13 @@ function startBoard(room) {
       add('shape', on ? 'Готово' : (single.type === 'line' || single.type === 'arrow' ? 'Тянуть концы' : 'Правка формы'), 'Двойной щелчок по фигуре', () => setShapeEdit(on ? null : single.id), on ? 'on' : '');
     }
     // «Правильная форма»: выровнять пропорции по меньшей стороне (центр остаётся на месте)
-    if (its.some((i) => regularFields(i, true) !== undefined)) add('regular', 'Правильная форма', 'Выровнять пропорции по меньшей стороне — Shift+R', makeRegularSel);
+    {
+      const fixable = its.filter((i) => regularFields(i));
+      if (fixable.length) {
+        const names = [...new Set(fixable.map((i) => FIX_NAME[regularKind(i)]))];
+        add('regular', names.length === 1 ? 'Выровнять: ' + names[0] : 'Выровнять фигуры', 'Shift+R', makeRegularSel);
+      }
+    }
     // геометрия: виды треугольников
     if (single) {
       const it = single; const set = (f) => act(() => setFields(it.id, f));
@@ -2155,15 +2305,12 @@ function startBoard(room) {
         add('fig:triangle', 'Сделать равнобедренным', 'Вершина встаёт над серединой основания', () => set(triangleFix(it, 'iso')));
       }
     }
-    const fillable = (i) => i.type === 'rect' || i.type === 'ellipse' || (i.type === 'poly' && i.closed);
-    if (its.some(fillable)) add('fill', its.filter(fillable).every((i) => i.fill) ? 'Убрать заливку' : 'Залить', 'Полупрозрачная заливка фигуры', () => act(() => { const v = !its.filter(fillable).every((i) => i.fill); for (const i of its) if (fillable(i)) setFields(i.id, { fill: v }); }));
     const dashable = (i) => ['line', 'arrow', 'rect', 'ellipse', 'poly'].includes(i.type);
     if (its.some(dashable)) add('dash', its.filter(dashable).every((i) => i.dash) ? 'Сплошная линия' : 'Пунктир', 'Сплошная / пунктир', () => act(() => { const v = !its.filter(dashable).every((i) => i.dash); for (const i of its) if (dashable(i)) setFields(i.id, { dash: v }); }));
-    add('copy', 'Дублировать', 'Ctrl+D', duplicate);
-    add('front', 'На передний план', 'Поверх всего остального — Ctrl+]', () => reorder(1));
-    add('back', 'На задний план', 'Под всем остальным — Ctrl+[', () => reorder(-1));
-    add('lock', its.every((i) => i.locked) ? 'Открепить' : 'Закрепить', 'Закреплённое нельзя случайно сдвинуть, выделить рамкой или стереть — Shift+L', toggleLock);
     add('trash', 'Удалить', 'Delete', deleteSelection, 'danger');
+    add('copy', 'Дублировать', 'Ctrl+D', duplicate);
+    if (its.some((i) => mirrorFields(i))) add('mirror', 'Отразить', 'Зеркально слева направо', mirrorSel);
+    add('lock', its.every((i) => i.locked) ? 'Открепить' : 'Закрепить', 'Закреплённое нельзя случайно сдвинуть, выделить рамкой или стереть — Shift+L', toggleLock);
     return A;
   }
   // толщина выделенного (как её показывает ползунок пера: у фигур хранится ×0,9)
@@ -2198,7 +2345,7 @@ function startBoard(room) {
   function updateSelBar() {
     const its = [...S.sel].map((id) => items.get(id)).filter(Boolean);
     if (!its.length || editorOpen) { selBar.hidden = true; selBar.dataset.key = ''; return; }
-    const key = (S.shapeEdit || '') + its.map((i) => `${i.id}${i.locked}${i.fill}${i.dash}${i.kind}${i.w}${i.h}${i.pts ? i.pts.length + ':' + i.pts[0] : ''}`).join('|');
+    const key = (S.shapeEdit || '') + its.map((i) => `${i.id}${i.locked}${i.fill}${i.dash}${i.kind}${i.flip}${i.w}${i.h}${i.pts ? i.pts.map((q) => q[0].toFixed(1) + ',' + q[1].toFixed(1)).join(';') : ''}`).join('|');
     if ((selBar.dataset.key === key || selBar._dragging) && !selBar.hidden) { selBar._sync?.(); placeSelBar(); return; } // ничего не поменялось — не трогаем (не мигает)
     selBar.dataset.key = key; selBar.innerHTML = '';
     selBar._sync = null;
@@ -2216,8 +2363,6 @@ function startBoard(room) {
     }
     const acts = selectionActions(its);
     acts.forEach((a, i) => {
-      if (a.ic === 'copy' && i > 0) selBar.append(el('div', { class: 'isep' }));
-      if (a.ic === 'trash') selBar.append(el('div', { class: 'isep' }));
       selBar.append(el('button', { class: 'ibtn sq ' + a.cls, title: a.label + ((a.title || '').match(/(Ctrl\S*|Shift\+\S+|Delete)$/) ? ' (' + a.title.match(/(Ctrl\S*|Shift\+\S+|Delete)$/)[1] + ')' : ''), onclick: (e) => { e.stopPropagation(); a.f(); } }, el('span', { class: 'ic', html: actIcon(a.ic) })));
     });
     selBar.hidden = false;
@@ -2238,10 +2383,17 @@ function startBoard(room) {
     const rightLimit = pos === 'right' ? tbr.left - 8 : W - 8;
     const leftLimit = pos === 'left' ? tbr.right + 8 : 8;
     const es = !shapeSel() && editSel(); const gapT = es ? 42 : 18, gapB = es && es.k === 'solid' ? 64 : es ? 42 : 18; // стрелки поворота у углов, у стереометрии снизу — вращение
+    // панель привязана к фигуре: двигаешь доску — она едет вместе с фигурой и уходит за край вместе с ней
     let top = y0 - h - gapT;
-    if (top < topLimit) top = y1 + gapB;
-    if (top + h > bottomLimit) top = Math.max(topLimit, Math.min(y0 + 8, bottomLimit - h));
-    selBar.style.left = Math.round(clamp((x0 + x1) / 2 - w / 2, leftLimit, rightLimit - w)) + 'px';
+    if (top < topLimit) {
+      if (y1 + gapB + h <= bottomLimit) top = y1 + gapB; // сверху места нет — под фигурой
+      else if (y0 < topLimit && y1 > bottomLimit) top = topLimit; // фигура больше экрана — у верхнего края видимой части
+    }
+    // по центру над фигурой; к краю экрана прижимаем, только если фигура шире панели и видна частично
+    let left = (x0 + x1) / 2 - w / 2;
+    const lo = Math.max(leftLimit, x0), hi = Math.min(rightLimit, x1) - w;
+    if (lo <= hi) left = clamp(left, lo, hi);
+    selBar.style.left = Math.round(left) + 'px';
     selBar.style.top = Math.round(top) + 'px';
     selBar.classList.remove('away');
   }
@@ -2408,6 +2560,13 @@ function startBoard(room) {
         el('span', { class: 'sz-n' }, String(v).replace('.', ','))));
     }
     const content = [row.el, chips];
+    // цвет — сразу здесь, чтобы не тянуться к панели (у ластика цвета нет)
+    let cols = null;
+    if (tool !== 'eraser') {
+      cols = el('div', { class: 'sz-colors' }, COLORS.map((c, i) => el('button', { class: 'cbtn', 'data-c': c, title: COLOR_NAMES[i], style: `--c:${c}`,
+        onclick: () => { pick(); setColor(c); groupPop = gp; paintAll(); } })));
+      content.push(cols);
+    }
     let modes = null;
     if (tool === 'eraser') {
       const mode = (precise, ic, label, title) => el('button', { class: 'sz-mode', 'data-p': precise ? 1 : 0, title, onclick: () => { prefs.eraserPrecise = precise; savePrefs(); pick(); renderToolbar(); groupPop = gp; updateCursor(); paintAll(); } },
@@ -2419,6 +2578,7 @@ function startBoard(room) {
       row.paint(); const v = sz(k);
       for (const ch of chips.children) ch.classList.toggle('on', Math.abs(+ch.dataset.v - v) < 1e-6);
       if (modes) for (const b of modes.children) b.classList.toggle('on', !!+b.dataset.p === !!prefs.eraserPrecise);
+      if (cols) { const cc = tool === 'hl' ? (prefs.hlColor || currentColor()) : (prefs.penColor || currentColor()); for (const b of cols.children) b.classList.toggle('on', b.dataset.c === cc); }
     };
     const pop = popover(anchor, content);
     pop.classList.add('sz-pop');
@@ -2741,11 +2901,20 @@ function startBoard(room) {
     tipFor = t; tipXY = [e.clientX, e.clientY];
     tipTimer = setTimeout(() => {
       if (tipFor !== t || !document.body.contains(t)) return;
-      // всегда в одном месте — внизу справа, слева от масштаба: ничего не закрывает
+      // всегда в одном месте — в левом нижнем углу; если там панель инструментов — рядом с ней, не поверх
       tipEl.textContent = t.dataset.tip;
       const r = tipEl.getBoundingClientRect(), z = zoomBar.getBoundingClientRect();
-      tipEl.style.left = Math.round(Math.max(8, z.left - 10 - r.width)) + 'px';
-      tipEl.style.top = Math.round(z.top + (z.height - r.height) / 2) + 'px';
+      let x = 12, y = z.top + (z.height - r.height) / 2;
+      const hits = (bx) => !(x + r.width + 6 <= bx.left || x - 6 >= bx.right || y + r.height + 6 <= bx.top || y - 6 >= bx.bottom);
+      // обходим панель, масштаб, открытые окошки и панель выделенного: боковую панель — справа от неё, остальное — сверху
+      const obst = [toolbar, zoomBar, selBar, ...popovers].filter((n) => n && !n.hidden && document.body.contains(n));
+      for (let k = 0; k < 6; k++) {
+        const o = obst.find((n) => hits(n.getBoundingClientRect())); if (!o) break;
+        const bx = o.getBoundingClientRect();
+        if (o === toolbar && toolbar.classList.contains('vert')) x = bx.right + 10; else y = bx.top - 10 - r.height;
+      }
+      tipEl.style.left = Math.round(x) + 'px';
+      tipEl.style.top = Math.round(y) + 'px';
       tipEl.classList.add('on');
     }, 300);
   }, true);
@@ -2813,7 +2982,8 @@ function startBoard(room) {
         ['Стереометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'solid')]] },
     more: { tools: ['note', 'image'], name: 'Ещё', sections: [['', ['note', 'image']]] },
   };
-  const BAR = ['select', 'hand', 'pen', 'eraser', 'hl', 'dpen', '|', '@shapes', '|', 'text', 'tex', 'graph', '@more'];
+  // Ручка и ластик — в середине панели (ближе к центру экрана), рядом выделение и ладонь; цвета — справа
+  const BAR = ['hl', 'dpen', '@shapes', '|', 'pen', 'eraser', 'select', 'hand', '|', 'text', 'tex', 'graph', 'image'];
   const toolDef = (id) => TOOLS.find((t) => t.id === id);
   function toolIcon(id) {
     if (id === 'eraser' && prefs.eraserPrecise) return 'eraserPrecise';
@@ -2853,6 +3023,7 @@ function startBoard(room) {
   }
   function renderToolbar() {
     clearTimeout(hoverTimer); // открытое окно остаётся привязанным: у новых кнопок тот же data-grp
+    const keepScroll = [toolbar.scrollLeft, toolbar.scrollTop];
     toolbar.innerHTML = '';
     for (const b of BAR) {
       if (b === '|') { toolbar.append(el('div', { class: 'sep' })); continue; }
@@ -2909,7 +3080,7 @@ function startBoard(room) {
           if (S.tool !== t.id || !SIZE_OF[t.id]) setTool(t.id); // V ещё раз — лассо, как раньше
           if (SIZE_OF[t.id] && !popOpen('size:' + t.id)) { const nb = toolbar.querySelector(`[data-grp="size:${t.id}"]`) || tb; openSizePop(t.id, nb); }
         },
-      }, icon(toolIcon(t.id)), el('span', { class: 'key' }, t.key));
+      }, icon(toolIcon(t.id)));
       if (SIZE_OF[t.id]) {
         tb.addEventListener('pointerenter', (e) => {
           if (e.pointerType === 'touch' || popOpen('size:' + t.id)) return;
@@ -2933,12 +3104,18 @@ function startBoard(room) {
       cb.onclick = () => { clearTimeout(hoverTimer); if (!popOpen('colors')) openColors(); };
       toolbar.append(cb);
     }
-    toolbar.append(el('div', { class: 'sep' }));
-    toolbar.append(el('div', { class: 'ur' },
-      el('button', { class: 'tbtn', title: 'Отменить своё действие — Ctrl+Z', onclick: doUndo }, icon('undo')),
-      el('button', { class: 'tbtn', title: 'Вернуть — Ctrl+Shift+Z или Ctrl+Y', onclick: doRedo }, icon('redo'))));
     if (typeof layoutBars === 'function') layoutBars();
+    if (toolbar.userScrolled) { toolbar.scrollLeft = keepScroll[0]; toolbar.scrollTop = keepScroll[1]; } else centerCore();
   }
+  // Узкий экран: панель прокручивается — сразу показываем середину (ручку, ластик), а не край
+  function centerCore() {
+    const pen = toolbar.querySelector('[data-grp="size:pen"]'); if (!pen) return;
+    toolbar.progScroll = true;
+    if (toolbar.classList.contains('vert')) toolbar.scrollTop = pen.offsetTop + pen.offsetHeight / 2 - toolbar.clientHeight / 2;
+    else toolbar.scrollLeft = pen.offsetLeft + pen.offsetWidth / 2 - toolbar.clientWidth / 2;
+    requestAnimationFrame(() => { toolbar.progScroll = false; });
+  }
+  toolbar.addEventListener('scroll', () => { if (!toolbar.progScroll) toolbar.userScrolled = true; }, { passive: true });
 
   const menuBtn = el('button', { class: 'tbtn', title: 'Меню', onclick: () => openMenu(menuBtn) }, icon('menu'));
   const pagesBox = el('div', { class: 'pages' });
@@ -3022,7 +3199,10 @@ function startBoard(room) {
     if (!l) { showConnect(); return; }
     navigator.clipboard.writeText(l).then(() => toast('Ссылка скопирована'), () => uiDialog({ title: 'Ссылка на доску', text: 'Скопируйте вручную: выделите и нажмите Ctrl+C.', readonlyText: l, ok: 'Закрыть', cancel: null }));
   } }, icon('link'));
-  topRight.append(statusBtn, shareBtn, followBtn, fsBtn, el('div', { class: 'sep' }), exitBtn);
+  const rolePill = el('div', { class: 'role-pill top', hidden: true });
+  const paintRolePill = () => { rolePill.hidden = !prefs.role; rolePill.textContent = ROLE_NAMES[prefs.role] || ''; };
+  paintRolePill();
+  topRight.append(rolePill, statusBtn, shareBtn, followBtn, fsBtn, el('div', { class: 'sep' }), exitBtn);
   // Новая версия на сайте: тихо проверяем раз в несколько минут и при возврате на вкладку
   if (location.protocol.startsWith('http')) {
     let shown = false;
@@ -3048,7 +3228,11 @@ function startBoard(room) {
     const next = d > 0 ? ZSTEPS.find((v) => v > z * 1.001) ?? 12 : [...ZSTEPS].reverse().find((v) => v < z / 1.001) ?? 0.1;
     zoomAt(W / 2, H / 2, next / z);
   }
+  // Снизу справа: отменить / вернуть и масштаб
   const zoomBar = el('div', { class: 'bar zoombar' },
+    el('button', { class: 'tbtn', title: 'Отменить своё действие — Ctrl+Z', onclick: doUndo }, icon('undo')),
+    el('button', { class: 'tbtn', title: 'Вернуть — Ctrl+Shift+Z или Ctrl+Y', onclick: doRedo }, icon('redo')),
+    el('div', { class: 'sep' }),
     el('button', { class: 'tbtn', title: 'Отдалить (Ctrl −)', onclick: () => zoomStep(-1) }, icon('minus')),
     zoomBtn,
     el('button', { class: 'tbtn', title: 'Приблизить (Ctrl +)', onclick: () => zoomStep(1) }, icon('plus')));
@@ -3098,7 +3282,7 @@ function startBoard(room) {
     document.body.style.setProperty('--zoom-bottom', (zoomHit ? bottomUsed + 8 : pos === 'bottom' ? BAR_LIFT : 28) + 'px');
     document.body.style.setProperty('--zoom-right', (pos === 'right' ? W - tb.left + 8 : 10) + 'px');
   }
-  new ResizeObserver(layoutBars).observe(document.body);
+  new ResizeObserver(() => { layoutBars(); if (!toolbar.userScrolled) centerCore(); }).observe(document.body);
   function renderStatus(st = hub.status()) {
     const peer = st.peers[0];
     let cls = 'gray', text = 'Нет подключения';
@@ -3259,6 +3443,32 @@ function startBoard(room) {
 
   // ---------- запуск ----------
   resize(); renderToolbar(); updateCursor(); renderStatus(); renderZoom();
+  // ---------- статус «репетитор / ученик» и счётчик ----------
+  // Спрашиваем один раз; браузер запоминает. Без имён и регистрации — только для подсчёта.
+  function askRole() { roleDialog(() => { paintRolePill(); countVisit(); }); }
+  // GoatCounter: без cookie и личных данных. Считаем: открытие доски, статус и доску (код доски — зашифрованный).
+  const GC_CODE = '';
+  let gcReady = null;
+  function countVisit() {
+    if (!GC_CODE || location.protocol === 'file:') return;
+    const send = () => {
+      const h = [...room].reduce((a, c) => (Math.imul(a, 31) + c.charCodeAt(0)) >>> 0, 7).toString(36);
+      const role = prefs.role || 'unknown';
+      try {
+        window.goatcounter.count({ path: '/open', title: 'Открыли доску' });
+        window.goatcounter.count({ path: 'role-' + role, title: role === 'tutor' ? 'Репетитор' : role === 'student' ? 'Ученик' : 'Без статуса', event: true });
+        window.goatcounter.count({ path: 'board-' + h, title: 'Доска', event: true });
+      } catch {}
+    };
+    if (window.goatcounter?.count) { send(); return; }
+    if (!gcReady) gcReady = new Promise((res) => {
+      window.goatcounter = { no_onload: true };
+      const sc = document.createElement('script'); sc.async = true; sc.src = 'https://gc.zgo.at/count.js';
+      sc.dataset.goatcounter = 'https://' + GC_CODE + '.goatcounter.com/count';
+      sc.onload = res; sc.onerror = () => res(); document.head.append(sc);
+    });
+    gcReady.then(() => { if (window.goatcounter?.count) send(); });
+  }
   // если пользователь заходит впервые — подсказка про клавиши
   let started = false;
   const start = () => {
@@ -3276,7 +3486,8 @@ function startBoard(room) {
     renderPages(); invalidate();
     hub.startTabs(room);
     if (!/[?&]nopeer\b/.test(location.search)) hub.startPeer(room);
-    window.__doska = { remotePv, peersById, peerAct, goToPeer, solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo }; window.__MC = ManualConnect;
+    if (!prefs.role && !/[?&]nopeer\b/.test(location.search)) askRole(); else countVisit(); // в тестах (nopeer) не спрашиваем
+    window.__doska = { remotePv, peersById, peerAct, goToPeer, solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo, selectionBox: () => selectionBox(), handles: () => handles(selectionBox()) }; window.__MC = ManualConnect;
   };
   idb.whenSynced.then(start);
   setTimeout(start, 3000); // если IndexedDB недоступна — всё равно запускаемся

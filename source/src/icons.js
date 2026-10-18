@@ -1,5 +1,7 @@
 const s = (d, extra = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ${extra}>${d}</svg>`;
 export const ICONS = {
+  mirror: s('<path d="M12 3v18" stroke-dasharray="2 2.2"/><path d="M9 6.5L3.5 18H9z"/><path d="M15 6.5l5.5 11.5H15z" fill="currentColor" fill-opacity=".15"/>'),
+  feedback: s('<path d="M4.5 5.5h15v10h-8l-4.5 3.5v-3.5H4.5z"/><path d="M8.5 9.3h7M8.5 12.2h4.5"/>'),
   select: s('<path d="M6 3.5l12 7.2-5.3 1.4-2.3 5.4z" fill="currentColor" fill-opacity=".15"/>'),
   lasso: s('<ellipse cx="12" cy="9.5" rx="8" ry="5.2" stroke-dasharray="3 2.4"/><path d="M8.5 14.3c-1.5 1.3-1.4 3.4.6 4.1 1.6.6 1.3 2.3-.3 3"/>'),
   hand: s('<path d="M8 12.5V5.8a1.5 1.5 0 013 0v5.7M11 11V4.6a1.5 1.5 0 013 0V11M14 11.3V6.4a1.5 1.5 0 013 0v7.9c0 3.9-2.6 6.7-6.3 6.7-2.6 0-4-1-5.3-3l-2.2-3.6a1.5 1.5 0 012.4-1.7L8 14.6"/>'),
@@ -45,7 +47,7 @@ export const ICONS = {
   broom: s('<path d="M14 4l-4 8M6.5 12h7l1 8h-9z"/><path d="M9 16v4M12 16v4"/>'),
   ctx: s('<circle cx="12" cy="6" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="18" r="1.4" fill="currentColor"/>'),
   dpen: s('<path d="M4.5 19.5l3.8-.9L19 7.9a2 2 0 000-2.8l-.1-.1a2 2 0 00-2.8 0L5.4 15.7z"/><path d="M3 22h2.5M8 22h2.5M13 22h2.5M18 22h2.5" stroke-width="2"/>'),
-  regular: s('<path d="M12 3.5l7.4 12.8H4.6z"/><circle cx="12" cy="11.2" r="1.2" fill="currentColor"/><path d="M8.3 9.9l-.9.5M15.7 9.9l.9.5M12 16.3v1.2" />'),
+  regular: s('<path d="M4.5 19.5l10-10"/><path d="M13 8l3 3"/><path d="M18 3.5v3M16.5 5h3M20 10.5v2.4M18.8 11.7h2.4M10 3.8v2.4M8.8 5h2.4" stroke-width="1.5"/>'),
   shape: s('<path d="M8 6h12l-4 12H4z"/><path d="M8 6h12" stroke-width="3.2" stroke-opacity=".45"/><circle cx="8" cy="6" r="1.6" fill="#fff"/><circle cx="20" cy="6" r="1.6" fill="#fff"/><circle cx="16" cy="18" r="1.6" fill="#fff"/><circle cx="4" cy="18" r="1.6" fill="#fff"/>'),
   full: s('<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>'),
 };

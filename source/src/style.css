@@ -259,9 +259,9 @@ kbd { font: 12px ui-monospace, Consolas, monospace; background: #f3f4f6; border:
 
 /* толщина в панели выделения и в меню фигур */
 .isize { display: flex; align-items: center; padding: 0 2px 0 8px; }
-.isize .sz-row { margin: 0; gap: 8px; }
+.isize .sz-row { margin: 0; gap: 4px; }
 .isize .sz-range { width: 110px; flex: none; }
-.isize .sz-val { min-width: 26px; font-size: 13px; }
+.isize .sz-val { min-width: 28px; font-size: 13px; text-align: center; }
 /* подсказки */
 .tip { position: fixed; z-index: 100; left: 0; top: 0; max-width: 420px; padding: 6px 10px; border-radius: 7px; background: #212529; color: #fff; font-size: 13px; line-height: 1.35; pointer-events: none; opacity: 0; transform: translateY(4px); transition: opacity .2s ease, transform .2s ease; box-shadow: 0 4px 14px rgba(0,0,0,.18); }
 .tip.on { opacity: 1; transform: none; }
@@ -347,3 +347,35 @@ kbd { font: 12px ui-monospace, Consolas, monospace; background: #f3f4f6; border:
 .axrow { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
 .axrow .inp.num { width: 84px; }
 .gmenu.down { bottom: auto; top: calc(100% + 6px); }
+/* «Кто вы?» — один раз при первом открытии */
+.role-dialog { width: 380px; text-align: center; }
+.role-dialog .dialog-h { justify-content: center; font-size: 18px; }
+.role-btns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 6px; }
+.role-btn { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 20px 10px; border: 1px solid var(--line); border-radius: 14px; background: #fff; font-size: 15px; font-weight: 600; }
+.role-btn:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.role-btn .ic, .role-btn .ic svg { width: 30px; height: 30px; }
+.role-pill { display: inline-flex; align-items: center; height: 26px; padding: 0 11px; border-radius: 13px; background: var(--accent-soft); color: var(--accent); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.role-pill.top { margin: 0 6px 0 4px; }
+.start-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.start-head h1 { margin: 0; }
+.role-choose { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+.role-pill.click { border: 0; cursor: pointer; font-family: inherit; }
+.role-pill.click:hover { background: var(--accent); color: #fff; }
+.role-btn.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.role-btn:disabled { opacity: .4; cursor: default; pointer-events: none; }
+.role-note { margin-top: 12px; }
+.role-foot { display: flex; justify-content: center; margin-top: 14px; }
+.fb-dialog { width: min(560px, calc(100vw - 32px)); }
+.fb-x { width: 34px; justify-content: center; padding: 0; font-size: 22px; color: var(--muted, #868e96); }
+.fb-frame { display: block; width: 100%; height: min(560px, calc(100vh - 160px)); border: 0; margin-top: 8px; border-radius: 10px; }
+.fb-empty { display: flex; align-items: center; justify-content: center; background: #f6f7f9; font-size: 14px; }
+.start-foot { display: flex; justify-content: center; margin-top: 14px; }
+.link-btn { border: 0; background: none; color: var(--muted, #868e96); font: inherit; font-size: 13px; cursor: pointer; padding: 4px 6px; }
+.link-btn:hover { color: var(--accent); text-decoration: underline; }
+.fb-btn { position: fixed; right: 20px; bottom: 20px; display: inline-flex; align-items: center; gap: 8px; height: 42px; padding: 0 16px 0 13px; border: 1px solid var(--line, #e5e7eb); border-radius: 21px; background: #fff; color: #1f2328; font: inherit; font-size: 14px; font-weight: 500; cursor: pointer; box-shadow: 0 4px 14px rgba(15, 23, 42, .08); }
+.fb-btn .ic, .fb-btn .ic svg { width: 20px; height: 20px; color: var(--accent); }
+.fb-btn:hover { border-color: var(--accent); color: var(--accent); }
+@media (max-width: 640px) { .fb-btn { position: static; margin: 14px auto 0; } #start { grid-auto-flow: row; align-content: center; } }
+.sz-colors { display: flex; justify-content: space-between; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line, #eceef1); }
+.sz-colors .cbtn { width: 34px; height: 34px; margin: 0; }
+.zoombar .sep { margin: 0 3px; }

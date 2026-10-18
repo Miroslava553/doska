@@ -1,7 +1,7 @@
 // Геометрия и рисование объектов доски.
 import { getStroke } from 'perfect-freehand';
 import { compileMany } from './expr.js';
-import { figSegments, drawFig, FIGS, figPrims } from './figs.js';
+import { figSegments, drawFig, FIGS, figPrims, rightMarkPts } from './figs.js';
 import { SOLID_KINDS, solidView } from './solid.js';
 
 export const FONT = '"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
@@ -448,7 +448,7 @@ export function shapePolys(it) {
       } else if (p.t === 'e') { const [cx, cy, rx, ry, a0, a1] = p.a; add(ell(cx * w, cy * h, Math.abs(rx * w), Math.abs(ry * h), a0, a1), p.d && 'fig'); }
       else if (p.t === 'txt') T.push({ x: p.a[0] * w, y: p.a[1] * h, s: p.s, fs: Math.max(12, Math.min(w, h) * 0.07) });
     }
-    if (f.right) { const m = Math.min(w, h) * 0.1; add([[0, h - m], [m, h - m], [m, h]], false, Math.max(1, it.size * 0.7)); }
+    if (f.right) add(rightMarkPts(it, w, h), false, Math.max(1, it.size * 0.7));
   }
   if (rotOf(it)) {
     for (const pc of P) pc.pts = pc.pts.map(([x, y, p]) => [...rotPt(it, x, y), p]);
@@ -467,8 +467,27 @@ function drawPieces(ctx, it, pieces) {
   ctx.setLineDash([]);
 }
 
+// Фигуры при изменении размера меняют геометрию, а не масштаб: толщина линии остаётся той, что выставлена.
+// Старый масштаб s тоже «впекается» (толщина = size·s), дальше s = 1.
+export const SCALE_BAKED = new Set(['line', 'arrow', 'rect', 'ellipse', 'fig', 'poly']);
+export function bakeShape(it, kx, ky, ax, ay) {
+  const s = it.s || 1, fx = s * kx, fy = s * ky;
+  const out = { x: ax + ((it.x || 0) - ax) * kx, y: ay + ((it.y || 0) - ay) * ky, s: 1, size: (it.size || 1) * s };
+  if (it.type === 'line' || it.type === 'arrow') Object.assign(out, { x1: it.x1 * fx, y1: it.y1 * fy, x2: it.x2 * fx, y2: it.y2 * fy });
+  else if (it.type === 'poly') out.pts = it.pts.map(([px, py]) => [px * fx, py * fy]);
+  else Object.assign(out, { w: it.w * fx, h: it.h * fy });
+  if (it.doff) out.doff = it.doff * s;
+  return out;
+}
 // ctx уже в мировых координатах. scale — пикселей экрана на единицу мира (для детализации).
 export function drawItem(ctx, it, ov, scale, pieces) {
+  if (ov && ov.ids && ov.ids.has(it.id) && SCALE_BAKED.has(it.type) && !pieces) {
+    const kx = ov.k || ov.kx || 1, ky = ov.k || ov.ky || 1;
+    if (kx !== 1 || ky !== 1) {
+      const b = bakeShape(it, kx, ky, ov.ax, ov.ay);
+      return drawItem(ctx, { ...it, ...b, x: b.x + (ov.dx || 0), y: b.y + (ov.dy || 0) }, null, scale);
+    }
+  }
   const t = itemTransform(it, ov);
   ctx.save();
   ctx.translate(t.x, t.y); ctx.scale(t.sx, t.sy);

@@ -73,7 +73,16 @@ export const FIGS = {
 
 // Отрезки фигуры (для попадания курсором) в локальных координатах w×h
 // примитивы фигуры с учётом её угла (если он задан)
-export function figPrims(it) { const f = FIGS[it.kind]; if (!f) return []; return (f.make && f.make(it)) || f.prims; }
+export function figPrims(it) {
+  const f = FIGS[it.kind]; if (!f) return [];
+  const P = (f.make && f.make(it)) || f.prims;
+  if (!it.flip) return P;
+  // отражение слева направо (кнопка «Отразить»)
+  return P.map((p) => p.t === 'e' ? { ...p, a: [1 - p.a[0], p.a[1], p.a[2], p.a[3], Math.PI - p.a[5], Math.PI - p.a[4]] }
+    : p.t === 'txt' ? p : { ...p, a: [1 - p.a[0], p.a[1], 1 - p.a[2], p.a[3]] });
+}
+// значок прямого угла: в левом нижнем углу, у отражённой фигуры — в правом
+export const rightMarkPts = (it, w, h) => { const m = Math.min(w, h) * 0.1; return it.flip ? [[w, h - m], [w - m, h - m], [w - m, h]] : [[0, h - m], [m, h - m], [m, h]]; };
 export function figSegments(it) {
   const f = FIGS[it.kind]; if (!f) return [];
   if (SOLID_KINDS.has(it.kind)) { const segs = []; for (const l of solidView(it).lines) for (let i = 1; i < l.pts.length; i++) segs.push([...l.pts[i - 1], ...l.pts[i]]); return segs; }
@@ -118,8 +127,8 @@ export function drawFig(ctx, it) {
   }
   ctx.setLineDash([]);
   if (f.right) { // значок прямого угла
-    const m = Math.min(w, h) * 0.1; ctx.lineWidth = Math.max(1, it.size * 0.7);
-    ctx.beginPath(); ctx.moveTo(0, h - m); ctx.lineTo(m, h - m); ctx.lineTo(m, h); ctx.stroke();
+    const q = rightMarkPts(it, w, h); ctx.lineWidth = Math.max(1, it.size * 0.7);
+    ctx.beginPath(); ctx.moveTo(...q[0]); ctx.lineTo(...q[1]); ctx.lineTo(...q[2]); ctx.stroke();
   }
 }
 
