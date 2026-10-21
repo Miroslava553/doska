@@ -1,6 +1,7 @@
 // Сборка в один самодостаточный HTML-файл: никаких внешних CDN.
 import * as esbuild from 'esbuild';
 import fs from 'node:fs';
+import { RELEASE } from './src/changelog.js';
 
 fs.mkdirSync('src/gen', { recursive: true });
 fs.copyFileSync('node_modules/pdfjs-dist/build/pdf.worker.min.mjs', 'src/gen/pdfworker.txt');
@@ -39,6 +40,6 @@ fs.writeFileSync('dist/doska.html', html);
 // Сайт для GitHub Pages: та же доска + файл версии
 fs.mkdirSync('dist/site', { recursive: true });
 fs.writeFileSync('dist/site/index.html', html);
-fs.writeFileSync('dist/site/version.json', JSON.stringify({ v: VERSION }));
+fs.writeFileSync('dist/site/version.json', JSON.stringify({ v: VERSION, notes: RELEASE }));
 fs.writeFileSync('dist/site/.nojekyll', '');
 console.log('version', VERSION, '| dist/doska.html', (html.length / 1024 / 1024).toFixed(2), 'MB; app js', (js.length / 1024).toFixed(0), 'KB');

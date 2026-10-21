@@ -20,8 +20,8 @@ with sync_playwright() as p:
     pg.mouse.move(800, 500); pg.mouse.down(); pg.mouse.move(900, 560, steps=8); pg.mouse.up(); pg.wait_for_timeout(100)
     n = lambda: pg.evaluate("() => [...window.__doska.items.values()].filter(i => i.type === 'stroke').length") if pg.evaluate("() => !!(window.__doska && window.__doska.items)") else None
     print('strokes after draw:', n())
-    pg.click('.zoombar > .tbtn:nth-child(1)'); pg.wait_for_timeout(100); print('after undo:', n())
-    pg.click('.zoombar > .tbtn:nth-child(2)'); pg.wait_for_timeout(100); print('after redo:', n())
+    pg.click('.urbar > .tbtn:nth-child(1)'); pg.wait_for_timeout(100); print('after undo:', n())
+    pg.click('.urbar > .tbtn:nth-child(2)'); pg.wait_for_timeout(100); print('after redo:', n())
     pen = pg.query_selector('.toolbar .tbtn[data-grp="size:pen"]'); pen.click(); pg.wait_for_timeout(200)
     pg.screenshot(path=OUT + 'pen-pop.png', clip={'x': 300, 'y': 0, 'width': 1100, 'height': 330})
     pg.click('.sz-colors .cbtn[data-c="#e03131"]'); pg.wait_for_timeout(150)

@@ -64,6 +64,8 @@ class Link {
       let c = this.chunks.get(id);
       if (!c) { c = { parts: new Array(total), got: 0 }; this.chunks.set(id, c); }
       if (!c.parts[i]) { c.parts[i] = u8.slice(9); c.got++; }
+      c.t = Date.now();
+      for (const [k, v] of this.chunks) if (Date.now() - (v.t || 0) > 60000) this.chunks.delete(k); // недошедшие куски не копим
       if (c.got === total) {
         this.chunks.delete(id);
         const len = c.parts.reduce((s, p) => s + p.length, 0);
@@ -75,9 +77,15 @@ class Link {
     }
     const payload = u8.subarray(1);
     if (type === T_SV) {
+      // тот же запрос недавно уже получил ответ (большая передача ещё идёт) — не шлём всё заново
+      const key = payload.join(',');
+      if (this.lastSvKey === key && Date.now() - this.lastSvAt < 5000) return;
+      this.lastSvKey = key; this.lastSvAt = Date.now();
       this.sendBin(T_UPDATE, Y.encodeStateAsUpdate(this.hub.doc, payload));
     } else if (type === T_UPDATE) {
       Y.applyUpdate(this.hub.doc, payload, this);
+      // пришло изменение, а того, на чём оно держится, у нас нет (что-то потерялось в пути) — сразу просим недостающее
+      if (this.hub.missing()) this.hub.resync(400);
     }
   }
   closed() {
@@ -102,6 +110,7 @@ export class Hub {
     // Связь «подвисла» (пропал Wi-Fi, уснул ноутбук): канал вроде открыт, но ничего не доходит.
     // Каждые 2 с шлём «я тут»; молчит дольше 6 с — закрываем канал и сразу переподключаемся.
     // У собеседника со старой версией (не шлёт «я тут») ничего не закрываем. Вкладка в фоне шлёт реже — ей даём 90 с.
+    setInterval(() => this.resync(), 15000);
     setInterval(() => {
       const hid = typeof document !== 'undefined' && document.hidden;
       for (const l of [...this.links]) {
@@ -125,7 +134,17 @@ export class Hub {
   on(ev, f) { this.listeners[ev].push(f); }
   onEphemeral(o, link) { for (const f of this.listeners.ephemeral) f(o, link); }
   emitStatus() { for (const f of this.listeners.status) f(this.status()); }
-  helloMsg() { return { t: 'hello', id: this.me.id, name: this.me.name, color: this.me.color }; }
+  helloMsg() { return { t: 'hello', id: this.me.id, name: this.me.name, color: this.me.color, role: this.me.role }; }
+  // Самопроверка: каждый обменивается «что у меня есть» и получает то, чего не хватает.
+  // Если какое-то сообщение потерялось (оборвалась связь посреди передачи), записи всё равно дойдут — сами, без перезахода.
+  missing() { const st = this.doc.store; return !!(st.pendingStructs || st.pendingDs); }
+  resync(delay = 0) {
+    clearTimeout(this.resyncT);
+    this.resyncT = setTimeout(() => {
+      const sv = Y.encodeStateVector(this.doc);
+      for (const l of this.links) if (l.alive && l.kind !== 'tab') l.sendBin(T_SV, sv);
+    }, delay);
+  }
   isPrimary(link) {
     if (link.kind === 'tab' || !link.remote) return true;
     for (const l of this.links) if (l.alive && l.kind !== 'tab' && l.remote && l.remote.id === link.remote.id) return l === link;

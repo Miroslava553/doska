@@ -10,17 +10,17 @@ export const GRID = 40; // клетка в мировых единицах
 // ---------- штрихи ----------
 export function decodePts(it) {
   if (it._pts) return it._pts;
-  const a = it.pts || [];
+  const a = it.pts || [], q = it.q || 10; // q — точность: 10 (0,1) или 100 (0,01) — для линий, написанных при сильном увеличении
   const out = [];
-  for (let i = 0; i + 2 < a.length; i += 3) out.push([a[i] / 10, a[i + 1] / 10, a[i + 2] / 100]);
+  for (let i = 0; i + 2 < a.length; i += 3) out.push([a[i] / q, a[i + 1] / q, a[i + 2] / 100]);
   it._pts = out;
   return out;
 }
-export function encodePts(pts) {
+export function encodePts(pts, q = 10) {
   const a = new Array(pts.length * 3);
   for (let i = 0; i < pts.length; i++) {
-    a[i * 3] = Math.round(pts[i][0] * 10);
-    a[i * 3 + 1] = Math.round(pts[i][1] * 10);
+    a[i * 3] = Math.round(pts[i][0] * q);
+    a[i * 3 + 1] = Math.round(pts[i][1] * q);
     a[i * 3 + 2] = Math.round(Math.max(0, Math.min(1, pts[i][2])) * 100);
   }
   return a;
@@ -60,6 +60,17 @@ function smooth(pts) {
   out.push(pts[pts.length - 1]);
   return out;
 }
+// через точки — плавной кривой (середины отрезков соединяются дугами), точки остаются на месте: без граней при большом увеличении
+export function curvePath(q) {
+  const p = new Path2D(); if (!q.length) return p;
+  p.moveTo(q[0][0], q[0][1]);
+  if (q.length === 1) { p.lineTo(q[0][0] + 0.01, q[0][1]); return p; }
+  if (q.length === 2) { p.lineTo(q[1][0], q[1][1]); return p; }
+  p.lineTo((q[0][0] + q[1][0]) / 2, (q[0][1] + q[1][1]) / 2);
+  for (let i = 1; i < q.length - 1; i++) p.quadraticCurveTo(q[i][0], q[i][1], (q[i][0] + q[i + 1][0]) / 2, (q[i][1] + q[i + 1][1]) / 2);
+  p.lineTo(q[q.length - 1][0], q[q.length - 1][1]);
+  return p;
+}
 export function centerPath(pts, raw = false) {
   const p = new Path2D(); const q = raw ? pts : smooth(pts);
   if (raw) { if (!q.length) return p; p.moveTo(q[0][0], q[0][1]); if (q.length === 1) p.lineTo(q[0][0] + 0.01, q[0][1]); for (let i = 1; i < q.length; i++) p.lineTo(q[i][0], q[i][1]); return p; }
@@ -71,7 +82,15 @@ export function centerPath(pts, raw = false) {
   return p;
 }
 // Единая отрисовка «чернил» (перо, маркер, пунктир) — для готовых, живых и чужих штрихов
+// Линия одной толщины (ручка без нажима, маркер) рисуется прямо по точкам круглой кистью: точно там, где вёл,
+// без «срезанного» начала и ломаных маленьких кругов (обводка с нажимом пропускает первые size единиц и редит точки).
+export const inkUniform = (it) => it.kind === 'hl' || (it.kind !== 'dash' && it.thin === 0);
+function strokeCenter(ctx, it, path) {
+  ctx.strokeStyle = it.color; ctx.lineWidth = it.size; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.stroke(path);
+}
 export function paintInk(ctx, it, pts, last = true) {
+  if (inkUniform(it)) { ctx.save(); strokeCenter(ctx, it, it.v === 2 ? curvePath(pts) : centerPath(pts)); ctx.restore(); return; }
   if (it.kind === 'dash') {
     ctx.save();
     ctx.strokeStyle = it.color; ctx.lineWidth = it.size; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
@@ -84,7 +103,7 @@ export function paintInk(ctx, it, pts, last = true) {
   }
 }
 export function strokePath(it) {
-  if (!it._path) it._path = outlinePath(decodePts(it), strokeOptions(it, true));
+  if (!it._path) it._path = inkUniform(it) ? (it.v === 2 ? curvePath(decodePts(it)) : centerPath(decodePts(it))) : outlinePath(decodePts(it), strokeOptions(it, true));
   return it._path;
 }
 
@@ -500,7 +519,8 @@ export function drawItem(ctx, it, ov, scale, pieces) {
     case 'stroke': {
       if (it.kind === 'hl') { ctx.globalAlpha = 0.38; }
       if (it.kind === 'dash') { for (const p of pieces || [decodePts(it)]) paintInk(ctx, pieces && p[0] && p[0][3] != null ? { ...it, doff: p[0][3] } : it, p); break; }
-      if (pieces) for (const p of pieces) ctx.fill(outlinePath(p, strokeOptions(it, true)));
+      if (inkUniform(it)) { if (pieces) for (const p of pieces) strokeCenter(ctx, it, it.v === 2 ? curvePath(p) : centerPath(p)); else strokeCenter(ctx, it, strokePath(it)); }
+      else if (pieces) for (const p of pieces) ctx.fill(outlinePath(p, strokeOptions(it, true)));
       else ctx.fill(strokePath(it));
       break;
     }
@@ -564,20 +584,37 @@ export function drawBackground(ctx, bg, view, w, h) {
   ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
   if (bg === 'plain') return;
   const step = GRID * view.z;
-  if (step < 7) return;
-  const alpha = Math.min(1, (step - 7) / 10);
-  const ox = ((view.x % step) + step) % step, oy = ((view.y % step) + step) % step;
+  // Клетка всегда одного размера. Когда отдаляешься и клетки становятся мельче ~7 px, их не видно —
+  // тогда проступает каждая 5-я линия (крупная клетка 5×5), ещё дальше — каждая 25-я. Переход плавный.
+  const vis = (s) => (s < 7 ? 0 : Math.min(1, (s - 7) / 10));
+  const levels = [1, 5, 25, 125].filter((L) => vis(step * L) > 0);
+  if (!levels.length) return;
+  const L0 = levels[0];
   ctx.save();
-  ctx.globalAlpha = alpha;
   if (bg === 'dots') {
     ctx.fillStyle = '#b8c2cf';
-    const r = Math.max(1, Math.min(2, step / 25));
-    for (let x = ox; x < w; x += step) for (let y = oy; y < h; y += step) ctx.fillRect(x - r / 2, y - r / 2, r, r);
-  } else {
-    ctx.strokeStyle = bg === 'lines' ? '#c9d6e8' : '#dbe4f0'; ctx.lineWidth = 1; ctx.beginPath();
-    if (bg === 'grid') for (let x = ox; x < w; x += step) { const px = Math.round(x) + 0.5; ctx.moveTo(px, 0); ctx.lineTo(px, h); }
-    for (let y = oy; y < h; y += step) { const py = Math.round(y) + 0.5; ctx.moveTo(0, py); ctx.lineTo(w, py); }
-    ctx.stroke();
+    const s0 = step * L0, ox = ((view.x % s0) + s0) % s0, oy = ((view.y % s0) + s0) % s0;
+    const r = Math.max(1, Math.min(2, s0 / 25));
+    ctx.globalAlpha = vis(s0);
+    for (let x = ox; x < w; x += s0) for (let y = oy; y < h; y += s0) ctx.fillRect(x - r / 2, y - r / 2, r, r);
+    ctx.restore(); return;
   }
+  ctx.strokeStyle = bg === 'lines' ? '#c9d6e8' : '#dbe4f0'; ctx.lineWidth = 1;
+  // каждая линия рисуется один раз — с яркостью самого крупного уровня, к которому она относится
+  const s0 = step * L0;
+  const lineAlpha = (i) => { let a = vis(s0); for (const L of levels) if (L > L0 && i % (L / L0) === 0) a = Math.max(a, vis(step * L)); return a; };
+  const pass = (horiz) => {
+    const off = horiz ? view.y : view.x, len = horiz ? h : w;
+    const i0 = Math.ceil(-off / s0), i1 = Math.floor((len - off) / s0);
+    const byA = new Map();
+    for (let i = i0; i <= i1; i++) { const a = lineAlpha(((i % 1e9) + 1e9) % 1e9); if (a <= 0) continue; const pos = Math.round(off + i * s0) + 0.5; (byA.get(a) || byA.set(a, []).get(a)).push(pos); }
+    for (const [a, list] of byA) {
+      ctx.globalAlpha = a; ctx.beginPath();
+      for (const pos of list) { if (horiz) { ctx.moveTo(0, pos); ctx.lineTo(w, pos); } else { ctx.moveTo(pos, 0); ctx.lineTo(pos, h); } }
+      ctx.stroke();
+    }
+  };
+  if (bg === 'grid') pass(false);
+  pass(true);
   ctx.restore();
 }

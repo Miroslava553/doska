@@ -10,6 +10,7 @@ import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, sol
 import { StrokeBuilder, oneEuro } from './pen.js';
 import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, moveCursor, vertexCursor } from './cursors.js';
 import { ICONS } from './icons.js';
+import { RELEASE } from './changelog.js';
 import { FIGS, figIcon, figPrims } from './figs.js';
 
 // ============ утилиты ============
@@ -97,7 +98,7 @@ for (const k of Object.keys(SIZE_CFG)) {
 const sz = (k) => (k === 'shape' ? (prefs.shapeSize > 0 ? prefs.shapeSize : prefs.size.pen) : prefs.size[k]);
 const savePrefs = () => LS.set('prefs', prefs);
 if (!prefs.v9) { prefs.steady = Math.max(prefs.steady ?? 0, 0.85); prefs.v9 = 1; savePrefs(); }
-const me = { id: uid(), get name() { return prefs.name || 'Без имени'; }, get color() { return prefs.color; } };
+const me = { id: uid(), get name() { return prefs.name || 'Без имени'; }, get color() { return prefs.color; }, get role() { return prefs.role || ''; } };
 
 // ============ свои диалоги вместо системных prompt/confirm ============
 function uiDialog({ title, text, input, value = '', placeholder = '', maxlength = 60, ok = 'Готово', cancel = 'Отмена', danger = false, readonlyText = null, icon = null }) {
@@ -209,6 +210,7 @@ function showStart() {
   const create = () => {
     const code = newRoomCode(); const t = titleIn.value.trim().slice(0, 40);
     if (t) LS.set('pendingTitle:' + code, t);
+    LS.set('created:' + code, 1); // доску создали здесь — первый лист можно заводить сразу
     const recent = LS.get('recent', []); recent.unshift({ room: code, t: Date.now(), title: t }); LS.set('recent', recent);
     open(code);
   };
@@ -319,7 +321,11 @@ function startBoard(room) {
     if (simple && !dirtyMain) { for (const id of added) if (items.get(id).page === S.page) pendingAppend.push(id); dirtyOver = true; if (!rafId) rafId = requestAnimationFrame(frame); }
     else invalidate();
   });
-  yPages.observeDeep(() => { pageListCache = null; renderPages(); if (S.page && !pages().some((p) => p.id === S.page) && pages()[0]) setPage(pages()[0].id); });
+  yPages.observeDeep(() => {
+    pageListCache = null; renderPages();
+    if (S.page && !pages().some((p) => p.id === S.page) && pages()[0]) setPage(pages()[0].id);
+    else if (S.page && !S.pageShown && pages().some((p) => p.id === S.page)) setPage(S.page, true); // дождались листов собеседника
+  });
   yMeta.observe(() => invalidate());
 
   function pages() {
@@ -703,10 +709,11 @@ function startBoard(room) {
     if (!id || !yPages.has(id) || yPages.get(id).get('deletedAt')) return;
     closeEditors(true);
     if (S.page) viewByPage[S.page] = { ...S.view };
-    S.page = id; S.sel.clear();
+    S.page = id; S.pageShown = true; S.sel.clear();
     S.view = viewByPage[id] ? { ...viewByPage[id] } : { x: W / 2, y: H / 3, z: 1 };
     LS.set('lastPage:' + room, id);
     renderPages(); renderZoom(); invalidate();
+    hub.resync(200); // перешли на лист — заодно сверяемся с собеседником: всё ли у нас есть
     if (!silent) viewChanged(false); else sendView();
   }
   function addPage(name, afterId) {
@@ -873,7 +880,7 @@ function startBoard(room) {
     const x = ov.ax + (it.x - ov.ax) * kx, y = ov.ay + (it.y - ov.ay) * ky;
     switch (it.type) {
       case 'text': case 'tex': return { x, y };
-      case 'stroke': return { x, y, pts: encodePts(decodePts(it).map(([px, py, pr]) => [px * kx, py * ky, pr])) };
+      case 'stroke': return { x, y, pts: encodePts(decodePts(it).map(([px, py, pr]) => [px * kx, py * ky, pr]), it.q || 10) };
       case 'line': case 'arrow': return { x, y, x1: it.x1 * kx, y1: it.y1 * ky, x2: it.x2 * kx, y2: it.y2 * ky };
       case 'poly': return { x, y, pts: it.pts.map(([px, py]) => [px * kx, py * ky]) };
       default: return { x, y, w: it.w * kx, h: it.h * ky };
@@ -917,6 +924,8 @@ function startBoard(room) {
   document.addEventListener('mouseleave', dropHover);
   cvOver.addEventListener('pointerleave', (e) => { if (e.pointerType === 'pen') lastPenHover = null; if (!gesture) { lastPtr = null; hover = null; hub.broadcast({ t: 'cur', id: me.id, hide: true }); invalidate(false); } });
   cvOver.addEventListener('contextmenu', (e) => e.preventDefault());
+  // средняя кнопка (колесо) — двигать доску, как в других досках; браузерную «автопрокрутку» не включаем
+  for (const t of ['mousedown', 'auxclick']) cvOver.addEventListener(t, (e) => { if (e.button === 1) e.preventDefault(); });
   cvOver.addEventListener('dblclick', (e) => e.preventDefault());
 
   function onDown(e) {
@@ -948,7 +957,7 @@ function startBoard(room) {
     else if (e.button === 0 || kind !== 'mouse') {
       const h = kind === 'pen' ? lastPenHover : null; lastPenHover = null;
       const lateMs = h ? e.timeStamp - h.t : 0, lateD = h ? Math.hypot(e.clientX - h.x, e.clientY - h.y) : 0;
-      if (h && INK_TOOLS.has(S.tool) && lateMs > 45 && lateMs < 700 && lateD > 4 && lateD < 240) {
+      if (h && INK_TOOLS.has(S.tool) && lateMs > 45 && lateMs < 400 && lateD > 4 && lateD < 32) {
         const [hx, hy] = toWorld(h.x, h.y);
         g = inkGesture([hx, hy, pt[2], h.x, h.y], e);
         g.move(pt, e);
@@ -1227,31 +1236,19 @@ function startBoard(room) {
     g.finalPoint = (p) => { if (kind !== 'dash') sb.end(p[0], p[1]); };
     g.inkTrail = () => (!sb.isDot && !sb.straightLine && kind === 'pen' ? { color: g.color, size: g.size, thin: g.thin, p: sb.lastPressure() } : null);
     g.dbg = () => { const geo = sb.geometry(); return { body: geo[geo.length - 1], tip: sb.tip, raw: sb.raw, inSlop: sb.isDot }; };
-    // Удержание: перо прижато и почти не двигается HOLD_MS — вместо точки включается выделение
-    // (объект под пером сразу берётся и тянется, на пустом месте — рамка). Короткий щелчок по пустому — снова перо.
-    const holdTool = S.tool;
-    let holdTimer = setTimeout(() => {
-      holdTimer = 0;
-      if (gesture !== g || !sb.isDot) return;
-      g.cancel();
-      setTool('select', { noToggle: true });
-      const sg = selectGesture(pt, { shiftKey: false, altKey: false });
-      S.autoBack = '*'; S.autoBackTool = holdTool;
-      if (sg) { sg.pid = g.pid; sg.touch = g.touch; gesture = sg; } else gesture = null;
-      updateCursor(); invalidate();
-    }, HOLD_MS);
-    const stopHold = () => { if (holdTimer) { clearTimeout(holdTimer); holdTimer = 0; } };
+    const stopHold = () => {}; // удержание пера больше не включает выделение — можно спокойно думать, не убирая ручку
     g.end = () => {
       stopHold();
       const pts = kind === 'dash' && !sb.isDot && !sb.straightLine ? sb.live(false).map((q) => q.slice(0, 3)) : sb.final(); // пунктир — как на экране, без пересглаживания
       let x0 = Infinity, y0 = Infinity;
       for (const q of pts) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); }
-      x0 = Math.floor(x0 * 10) / 10; y0 = Math.floor(y0 * 10) / 10; // начало на сетке хранения — точки не сдвигаются при сохранении
+      const q = S.view.z >= 2 ? 100 : 10; // при сильном увеличении храним точнее — маленькие буквы и кружки без «граней»
+      x0 = Math.floor(x0 * q) / q; y0 = Math.floor(y0 * q) / q; // начало на сетке хранения — точки не сдвигаются при сохранении
       const local = pts.map((q) => [q[0] - x0, q[1] - y0, q[2]]);
       const id = uid(); const prev = g.prevId ? items.get(g.prevId) : null;
       act(() => {
         if (prev) yItems.delete(prev.id);
-        addItem({ id, type: 'stroke', page: S.page, z: prev ? prev.z : zTop(S.page), x: x0, y: y0, s: 1, color: g.color, size: g.size, kind, v: 2, thin: g.thin, pts: encodePts(local) });
+        addItem({ id, type: 'stroke', page: S.page, z: prev ? prev.z : zTop(S.page), x: x0, y: y0, s: 1, color: g.color, size: g.size, kind, v: 2, thin: g.thin, ...(q === 100 ? { q } : {}), pts: encodePts(local, q) });
       });
       if (g.prevId) S.hidden.delete(g.prevId);
       lastInk = { id, t: performance.now(), kind, color: g.color, size: g.size, keys: sb.keys, end: sb.isDot ? [sb.start[0], sb.start[1]] : [sb.raw[0], sb.raw[1]] };
@@ -1260,7 +1257,6 @@ function startBoard(room) {
     g.cancel = () => { stopHold(); if (g.prevId) S.hidden.delete(g.prevId); liveEnd(g); };
     return g;
   }
-  const HOLD_MS = 400;
 
   // ластик: целиком (по умолчанию) или точный (разрезает штрихи)
   // Ластик: целиком (по умолчанию) или точный — режет и линии, и фигуры ровно по своему кругу.
@@ -1382,7 +1378,7 @@ function startBoard(room) {
         if (pieces) for (const [id, list] of pieces) {
           const it = items.get(id); if (!it) continue;
           yItems.delete(id);
-          if (it.type === 'stroke') { list.forEach((p, k) => addItem({ ...it, id: uid(), z: it.z + k * 1e-6, pts: encodePts(p), ...(it.kind === 'dash' && p[0][3] != null ? { doff: p[0][3] } : {}) })); continue; }
+          if (it.type === 'stroke') { list.forEach((p, k) => addItem({ ...it, id: uid(), z: it.z + k * 1e-6, pts: encodePts(p, it.q || 10), ...(it.kind === 'dash' && p[0][3] != null ? { doff: p[0][3] } : {}) })); continue; }
           // фигура распалась на куски — каждый кусок становится ломаной того же цвета, толщины и вида
           const base = { page: it.page, x: it.x, y: it.y, s: it.s || 1, color: it.color };
           list.forEach((pc, k) => {
@@ -2908,7 +2904,7 @@ function startBoard(room) {
       let x = 12, y = z.top + (z.height - r.height) / 2;
       const hits = (bx) => !(x + r.width + 6 <= bx.left || x - 6 >= bx.right || y + r.height + 6 <= bx.top || y - 6 >= bx.bottom);
       // обходим панель, масштаб, открытые окошки и панель выделенного: боковую панель — справа от неё, остальное — сверху
-      const obst = [toolbar, zoomBar, selBar, ...popovers].filter((n) => n && !n.hidden && document.body.contains(n));
+      const obst = [toolbar, zoomBar, selBar, whatsNew, ...popovers].filter((n) => n && !n.hidden && document.body.contains(n));
       for (let k = 0; k < 6; k++) {
         const o = obst.find((n) => hits(n.getBoundingClientRect())); if (!o) break;
         const bx = o.getBoundingClientRect();
@@ -2983,8 +2979,25 @@ function startBoard(room) {
         ['Стереометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'solid')]] },
     more: { tools: ['note', 'image'], name: 'Ещё', sections: [['', ['note', 'image']]] },
   };
-  // Порядок: маркер, пунктир, ладонь | ручка, ластик, выделение, фигуры | текст, формула, график, картинка | цвета
-  const BAR = ['hl', 'dpen', 'hand', '|', 'pen', 'eraser', 'select', '@shapes', '|', 'text', 'tex', 'graph', 'image'];
+  // Порядок по умолчанию: ладонь, выделение, ручки (основная, пунктир, маркер), ластик | фигуры | текст, формула, график, картинка | цвета.
+  // Каждый может поменять порядок и спрятать лишнее: меню → «Кнопки на панели…» (хранится в этом браузере).
+  const BAR_DEFAULT = ['hand', 'select', 'pen', 'dpen', 'hl', 'eraser', '|', '@shapes', '|', 'text', 'tex', 'graph', 'image'];
+  const barOrder = () => {
+    const known = new Set(BAR_DEFAULT.filter((b) => b !== '|'));
+    let ord = Array.isArray(prefs.barOrder) ? prefs.barOrder.filter((b) => b === '|' || known.has(b)) : BAR_DEFAULT.slice();
+    for (const b of known) if (!ord.includes(b)) ord.push(b); // новые кнопки из обновлений — в конец
+    return ord;
+  };
+  function barList() {
+    const hidden = new Set(prefs.barHidden || []);
+    const out = [];
+    for (const b of barOrder()) {
+      if (b === '|') { if (out.length && out[out.length - 1] !== '|') out.push('|'); continue; }
+      if (!hidden.has(b)) out.push(b);
+    }
+    while (out[out.length - 1] === '|') out.pop();
+    return out;
+  }
   const toolDef = (id) => TOOLS.find((t) => t.id === id);
   function toolIcon(id) {
     if (id === 'eraser' && prefs.eraserPrecise) return 'eraserPrecise';
@@ -3026,7 +3039,7 @@ function startBoard(room) {
     clearTimeout(hoverTimer); // открытое окно остаётся привязанным: у новых кнопок тот же data-grp
     const keepScroll = [toolbar.scrollLeft, toolbar.scrollTop];
     toolbar.innerHTML = '';
-    for (const b of BAR) {
+    for (const b of barList()) {
       if (b === '|') { toolbar.append(el('div', { class: 'sep' })); continue; }
       if (b[0] === '@') {
         const gname = b.slice(1); const grp = GROUPS[gname];
@@ -3109,6 +3122,12 @@ function startBoard(room) {
     if (toolbar.userScrolled) { toolbar.scrollLeft = keepScroll[0]; toolbar.scrollTop = keepScroll[1]; } else centerCore();
   }
   // Узкий экран: панель прокручивается — сразу показываем середину (ручку, ластик), а не край
+  // Правая кнопка по свободному месту панели (не по кнопке) — настройка кнопок
+  toolbar.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    if (e.target.closest('button')) return;
+    closePopovers(); barSettings();
+  });
   function centerCore() {
     const pen = toolbar.querySelector('[data-grp="size:pen"]'); if (!pen) return;
     toolbar.progScroll = true;
@@ -3178,9 +3197,53 @@ function startBoard(room) {
       el('div', { class: 'mh' }, 'Панель инструментов'),
       el('div', { class: 'row' }, ...[['top', 'Сверху'], ['bottom', 'Снизу'], ['left', 'Слева'], ['right', 'Справа']].map(([id, label]) =>
         el('button', { class: 'chip' + ((prefs.barPos || 'top') === id ? ' on' : ''), onclick: () => { prefs.barPos = id; savePrefs(); closePopovers(); renderToolbar(); invalidate(false); } }, label))),
+      item('Кнопки на панели…', () => { closePopovers(); barSettings(); }),
       el('div', { class: 'mh' }, 'Прочее'),
       item('Горячие клавиши и подсказки', showHelp, '?'),
     ]);
+  }
+  // Настройка кнопок: перетащить строку — поменять порядок, глаз — показать/спрятать кнопку
+  function barSettings() {
+    let ord = barOrder().slice(); const hidden = new Set(prefs.barHidden || []);
+    const nameOf = (b) => b === '|' ? 'Разделитель' : b === '@shapes' ? 'Фигуры' : toolDef(b)?.name || b;
+    const iconOf = (b) => b === '|' ? '' : b === '@shapes' ? iconHtml(prefs.last_shapes && toolDef(prefs.last_shapes) ? prefs.last_shapes : 'line') : iconHtml(b);
+    const list = el('div', { class: 'bs-list' });
+    const apply = () => { prefs.barOrder = ord.slice(); prefs.barHidden = [...hidden]; savePrefs(); renderToolbar(); invalidate(false); };
+    const paint = () => {
+      list.innerHTML = '';
+      ord.forEach((b, i) => {
+        const off = b !== '|' && hidden.has(b);
+        const row = el('div', { class: 'bs-row' + (b === '|' ? ' sep-row' : '') + (off ? ' off' : ''), 'data-i': i },
+          el('span', { class: 'bs-grip', title: 'Перетащите, чтобы поменять место' }, '⋮⋮'),
+          b === '|' ? el('span', { class: 'bs-sepline' }) : el('span', { class: 'ic', html: iconOf(b) }),
+          el('span', { class: 'bs-name' }, nameOf(b)),
+          b === '|' ? null : el('button', { class: 'bs-eye' + (off ? ' off' : ''), title: off ? 'Показать на панели' : 'Спрятать с панели',
+            onclick: () => { if (off) hidden.delete(b); else { if (ord.filter((x) => x !== '|' && !hidden.has(x)).length <= 1) return; hidden.add(b); } apply(); paint(); } },
+            el('span', { class: 'ic', html: ICONS.eye })));
+        row.addEventListener('pointerdown', (e) => {
+          if (e.target.closest('.bs-eye')) return;
+          e.preventDefault(); row.setPointerCapture(e.pointerId);
+          const rows = [...list.children], h = row.getBoundingClientRect().height + 4, y0 = e.clientY;
+          let at = i; row.classList.add('drag');
+          const mv = (ev) => {
+            const dy = ev.clientY - y0; row.style.transform = `translateY(${dy}px)`;
+            at = clamp(i + Math.round(dy / h), 0, ord.length - 1);
+            rows.forEach((r, k) => { if (r === row) return; const shift = (k > i && k <= at) ? -h : (k < i && k >= at) ? h : 0; r.style.transform = shift ? `translateY(${shift}px)` : ''; });
+          };
+          const up = () => {
+            row.removeEventListener('pointermove', mv); row.removeEventListener('pointerup', up); row.removeEventListener('pointercancel', up);
+            if (at !== i) { const [x] = ord.splice(i, 1); ord.splice(at, 0, x); apply(); }
+            paint();
+          };
+          row.addEventListener('pointermove', mv); row.addEventListener('pointerup', up); row.addEventListener('pointercancel', up);
+        });
+        list.append(row);
+      });
+    };
+    paint();
+    const reset = el('button', { class: 'btn', onclick: () => { ord = BAR_DEFAULT.slice(); hidden.clear(); delete prefs.barOrder; delete prefs.barHidden; savePrefs(); renderToolbar(); paint(); } }, 'Как было');
+    const d = modal('Кнопки на панели', el('div', { class: 'bs' }, list, el('div', { class: 'bs-foot' }, reset, el('button', { class: 'btn primary', onclick: () => d.close() }, 'Готово'))));
+    d.m.querySelector('.dialog').classList.add('bs-dialog');
   }
   function toggleFullscreen() {
     if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => toast('Браузер не разрешил полный экран — нажмите F11'));
@@ -3204,6 +3267,17 @@ function startBoard(room) {
   const paintRolePill = () => { rolePill.hidden = !prefs.role; rolePill.textContent = ROLE_NAMES[prefs.role] || ''; };
   paintRolePill();
   topRight.append(rolePill, statusBtn, shareBtn, followBtn, fsBtn, el('div', { class: 'sep' }), exitBtn);
+  // «Что нового»: окно со списком изменений. Кнопка сбоку видна сутки после выхода версии.
+  function showRelease(rel = RELEASE, pending = false) {
+    const body = el('div', { class: 'rel' },
+      el('div', { class: 'rel-sub' }, rel.title),
+      ...rel.sections.map(([h, list]) => el('div', { class: 'rel-sec' }, el('div', { class: 'rel-h' }, h), el('ul', {}, ...list.map((t) => el('li', {}, t))))),
+      pending ? el('div', { class: 'rel-foot' }, el('button', { class: 'btn primary', onclick: () => location.reload() }, 'Обновить')) : null);
+    const d = modal('Что нового', body); d.m.querySelector('.dialog').classList.add('rel-dialog');
+  }
+  const relAt = (() => { const m = /^(\d{4})\.(\d\d)\.(\d\d)-(\d\d)(\d\d)(\d\d)$/.exec(__VERSION__); return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : 0; })();
+  const whatsNew = el('button', { class: 'bar whatsnew', onclick: () => showRelease() }, el('span', { class: 'wn-dot' }), 'Что нового');
+  if (relAt && Date.now() - relAt < 24 * 3600 * 1000) { app.append(whatsNew); setTimeout(() => whatsNew.remove(), Math.max(0, relAt + 24 * 3600 * 1000 - Date.now())); }
   // Новая версия на сайте: тихо проверяем раз в несколько минут и при возврате на вкладку
   if (location.protocol.startsWith('http')) {
     let shown = false;
@@ -3211,10 +3285,11 @@ function startBoard(room) {
       if (shown || document.hidden) return;
       try {
         const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' }); if (!r.ok) return;
-        const { v } = await r.json();
+        const { v, notes } = await r.json();
         if (v && v !== __VERSION__) {
           shown = true;
           document.body.append(el('div', { class: 'bar newver' }, el('span', {}, 'Доступна новая версия'),
+            notes ? el('button', { class: 'btn small', onclick: () => showRelease(notes, true) }, 'Что нового') : null,
             el('button', { class: 'btn primary small', onclick: () => location.reload() }, 'Обновить')));
         }
       } catch {}
@@ -3320,7 +3395,11 @@ function startBoard(room) {
   }
   hub.on('status', (st) => {
     const had = renderStatus.lastPeers || 0; renderStatus.lastPeers = st.peers.length;
-    if (st.peers.length > had) { toast(`${st.peers[0].name}: подключение установлено`); sendView(); }
+    if (st.peers.length > had) {
+      const pr = st.peers[st.peers.length - 1];
+      const who = pr.role === 'student' ? 'Подключился ученик' : pr.role === 'tutor' ? 'Подключился репетитор' : 'Подключился собеседник';
+      toast(`${who}: ${pr.name}`); sendView();
+    }
     if (st.peers.length < had) toast('Собеседник отключился');
     renderStatus(st);
   });
@@ -3442,7 +3521,6 @@ function startBoard(room) {
       ['Выделить всё на листе', 'Ctrl+A'],
       ['Закрепить / открепить', 'Shift+L'],
       ['Выделить закреплённое', 'Alt+клик'],
-      ['Выделить и перенести, не меняя перо', 'удерживать перо на месте; щелчок по пустому — снова перо'],
       ['Изменить текст/формулу/график', 'двойной клик или Enter'],
       ['Двигать доску', 'Пробел+тянуть, правая или средняя кнопка, кнопка пера'],
       ['Быстрое меню (инструменты и цвета)', 'правый щелчок или кнопка пера по пустому месту'],
@@ -3467,7 +3545,7 @@ function startBoard(room) {
   // Спрашиваем один раз; браузер запоминает. Без имён и регистрации — только для подсчёта.
   function askRole() { roleDialog(() => { paintRolePill(); countVisit(); }); }
   // GoatCounter: без cookie и личных данных. Считаем: открытие доски, статус и доску (код доски — зашифрованный).
-  const GC_CODE = '';
+  const GC_CODE = 'doska-mira';
   let gcReady = null;
   function countVisit() {
     if (!GC_CODE || location.protocol === 'file:') return;
@@ -3495,19 +3573,25 @@ function startBoard(room) {
     if (started) return; started = true;
     for (const id of yItems.keys()) refreshItem(id);
     for (const [id, m] of [...yPages.entries()]) if (m.get('deletedAt') && Date.now() - m.get('deletedAt') > 15000) { m.set('deletedAt', 1); hardDeletePage(id); }
-    ensureFirstPage();
-    if (!pages().length) doc.transact(() => { const m = new Y.Map(); m.set('name', 'Лист 1'); m.set('order', 1); yPages.set('p' + uid(), m); }, NOUNDO);
+    // Зашли по ссылке на чужую доску впервые: свой «Лист 1» не заводим, а ждём листы собеседника.
+    // Иначе два одинаковых первых листа спорят, и у одного пропадает название листа (а то и записи на нём не видны).
+    const createdHere = LS.get('created:' + room, null); if (createdHere) localStorage.removeItem('doska:created:' + room);
+    const waitPages = !yPages.size && !createdHere && !/[?&]nopeer\b/.test(location.search);
+    const makeFirst = () => { ensureFirstPage(); if (!pages().length) doc.transact(() => { const m = new Y.Map(); m.set('name', 'Лист 1'); m.set('order', 1); yPages.set('p' + uid(), m); }, NOUNDO); };
+    if (!waitPages) makeFirst();
+    else setTimeout(() => { if (!pages().length) { makeFirst(); setPage(pages()[0].id, true); } }, 8000); // никого нет — тогда свой
     const pending = LS.get('pendingTitle:' + room, null);
     if (pending && !yMeta.get('title')) doc.transact(() => yMeta.set('title', pending), NOUNDO);
     if (pending) localStorage.removeItem('doska:pendingTitle:' + room);
     renderTitle(); layoutBars();
     const lp = LS.get('lastPage:' + room, null);
-    setPage(lp && pages().some((p) => p.id === lp) ? lp : pages()[0].id, true);
+    if (pages().length) setPage(lp && pages().some((p) => p.id === lp) ? lp : pages()[0].id, true);
+    else S.page = 'p1'; // лист появится, как только придут листы собеседника
     renderPages(); invalidate();
     hub.startTabs(room);
     if (!/[?&]nopeer\b/.test(location.search)) hub.startPeer(room);
     if (!prefs.role && !/[?&]nopeer\b/.test(location.search)) askRole(); else countVisit(); // в тестах (nopeer) не спрашиваем
-    window.__doska = { remotePv, peersById, peerAct, goToPeer, solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo, selectionBox: () => selectionBox(), handles: () => handles(selectionBox()) }; window.__MC = ManualConnect;
+    window.__doska = { remotePv, peersById, peerAct, goToPeer, solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo, selectionBox: () => selectionBox(), handles: () => handles(selectionBox()), Y, setPage, pages, viewByPage }; window.__MC = ManualConnect;
   };
   idb.whenSynced.then(start);
   setTimeout(start, 3000); // если IndexedDB недоступна — всё равно запускаемся

@@ -13,8 +13,9 @@ import { buildInk, simplifyInk } from './ink.js';
 export const TAP_SLOP = 3;    // экранные px: меньше — это точка
 export const DOT_MIN_P = 0.55; // точка всегда заметная
 export const PROFILES = {
-  pen: { filter: true, step: 1.5, base: 3, spread: 0, max: 3 },
-  mouse: { filter: false, step: 1.5, base: 10, spread: 2.2, max: 36 },
+  // сглаживание лёгкое: линия идёт ровно там, где ведёшь, даже маленький кружок не «скругляется в квадрат»
+  pen: { filter: true, step: 1, base: 2, spread: 0, max: 2 },
+  mouse: { filter: false, step: 1, base: 6, spread: 1.4, max: 18 },
 };
 
 // «1€» (Casiez и др., 2012). zoom() — текущий масштаб, чтобы скорость считалась в экранных пикселях.
@@ -39,7 +40,8 @@ export class StrokeBuilder {
   // device: 'pen' | 'mouse'; steady: 0…1.2 (ползунок «Сглаживание линии»); zoom: () => число
   constructor({ x, y, p, t, device, steady = 0.85, zoom, continueKeys = null }) {
     this.device = device; this.prof = PROFILES[device] || PROFILES.mouse; this.zoom = zoom;
-    this.body = this.prof.filter ? oneEuro(zoom, { minCutoff: 0.9 * (1.6 - steady) }) : null;
+    // фильтр шума датчика почти без запаздывания (раньше линия отставала от пера на ~0,2 с и «догоняла» рывками)
+    this.body = this.prof.filter ? oneEuro(zoom, { minCutoff: 3, beta: 0.08 }) : null;
     this.tipF = this.prof.filter ? oneEuro(zoom, { minCutoff: 8, beta: 0.1, pressureAware: false }) : null;
     this.start = [x, y, p]; this.raw = [x, y, p]; this.tip = [x, y, p];
     this.straightLine = false; this.dirty = false; this.cache = null;
