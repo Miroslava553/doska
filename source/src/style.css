@@ -397,10 +397,9 @@ kbd { font: 12px ui-monospace, Consolas, monospace; background: #f3f4f6; border:
 .bs-eye.off { color: #adb5bd; }
 .bs-eye.off::after { content: ''; position: absolute; width: 22px; height: 2px; background: currentColor; transform: rotate(-45deg); border-radius: 1px; }
 .bs-foot { display: flex; justify-content: space-between; margin-top: 14px; }
-.whatsnew { left: 12px; bottom: var(--bar-bottom, 12px); height: 34px; padding: 0 13px 0 11px; gap: 8px; border: 0; font: inherit; font-size: 13px; font-weight: 500; color: #343a40; cursor: pointer; }
+.whatsnew { height: 34px; padding: 0 13px 0 11px; gap: 8px; border: 0; font: inherit; font-size: 13px; font-weight: 500; color: #343a40; cursor: pointer; }
 .whatsnew:hover { color: var(--accent); }
 .wn-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
-body[data-bar="left"] .whatsnew { left: 124px; }
 .rel-dialog { width: min(520px, calc(100vw - 32px)); }
 .rel { max-height: min(560px, calc(100vh - 180px)); overflow-y: auto; margin-top: 4px; }
 .rel-sub { color: var(--muted, #868e96); font-size: 13px; margin-bottom: 10px; }
@@ -409,3 +408,14 @@ body[data-bar="left"] .whatsnew { left: 124px; }
 .rel ul { margin: 0; padding-left: 18px; }
 .rel li { font-size: 13.5px; line-height: 1.45; margin: 3px 0; color: #343a40; }
 .rel-foot { display: flex; justify-content: flex-end; margin-top: 14px; }
+.shape-size { flex-direction: column; align-items: stretch; gap: 8px; }
+.sh-top { display: flex; align-items: center; gap: 8px; }
+.sh-top .sz-row { flex: 1; margin: 0; }
+.sh-same { white-space: nowrap; }
+.sh-same:disabled { opacity: .45; cursor: default; }
+.sh-chips { justify-content: space-between; }
+.sh-chip { width: 44px; }
+.sz-line { display: block; width: 24px; border-radius: 6px; background: currentColor; min-height: 1px; }
+.fig-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; margin-right: -4px; padding-right: 4px; }
+.fig-pop .shape-size { padding-top: 8px; margin-top: 4px; }
+.fig-pop .sh-chip { height: 40px; gap: 3px; }

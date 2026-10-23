@@ -54,11 +54,13 @@ const SIZE_CFG = {
   pen: { min: 0.5, max: 20, step: 0.5, presets: [1, 1.5, 2, 3, 4, 5, 6, 8, 10, 14], def: 3.5, name: 'Толщина' },
   hl: { min: 4, max: 64, step: 1, presets: [6, 10, 14, 20, 28, 36, 48], def: 20, name: 'Толщина маркера' },
   eraser: { min: 4, max: 120, step: 1, presets: [8, 12, 20, 28, 40, 56, 80], def: 28, name: 'Размер ластика' },
-  shape: { min: 0.5, max: 20, step: 0.5, presets: [1, 2, 3, 4, 6, 10], def: 3.5, name: 'Толщина фигур' },
+  shape: { min: 0.5, max: 20, step: 0.5, presets: [1, 2, 3, 4, 6, 8, 12], def: 3.5, name: 'Толщина фигур' },
   text: { min: 10, max: 96, step: 1, presets: [14, 18, 22, 28, 36, 48, 64], def: 28, name: 'Размер текста' },
 };
 const OLD_SIZES = { pen: [2, 3.5, 6], hl: [12, 20, 32], eraser: [12, 28, 56], text: [20, 28, 40] };
-const LINE_TOOLS = new Set(['line', 'dline', 'arrow']);
+const LINE_TOOLS = new Set(['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin']);
+// стрелки: обычная, пунктирная, двусторонняя (двояковыпуклая линза), с обратными концами (двояковогнутая линза)
+const ARROW_KINDS = { arrow: {}, darrow: { dash: true }, arrow2: { heads: 'both' }, arrowin: { heads: 'in' } };
 const TOOLS = [
   { id: 'select', key: 'V', name: 'Выделение', hint: 'V ещё раз — лассо' },
   { id: 'hand', key: 'H', name: 'Рука', hint: 'или удерживайте Пробел' },
@@ -70,6 +72,9 @@ const TOOLS = [
   { id: 'line', key: 'L', name: 'Линия', hint: 'L ещё раз — пунктирная; Shift — шаг 15°' },
   { id: 'dline', key: 'L L', name: 'Пунктирная линия', hint: 'Shift — шаг 15°' },
   { id: 'arrow', key: 'A', name: 'Стрелка / вектор' },
+  { id: 'darrow', key: '', name: 'Пунктирная стрелка' },
+  { id: 'arrow2', key: '', name: 'Двусторонняя стрелка (двояковыпуклая линза)' },
+  { id: 'arrowin', key: '', name: 'Двояковогнутая линза' },
   { id: 'rect', key: 'R', name: 'Прямоугольник', hint: 'Shift — квадрат' },
   { id: 'ellipse', key: 'O', name: 'Эллипс', hint: 'Shift — круг' },
   { id: 'circle', key: 'C', name: 'Окружность от центра', hint: 'как циркуль' },
@@ -97,6 +102,7 @@ for (const k of Object.keys(SIZE_CFG)) {
 }
 const sz = (k) => (k === 'shape' ? (prefs.shapeSize > 0 ? prefs.shapeSize : prefs.size.pen) : prefs.size[k]);
 const savePrefs = () => LS.set('prefs', prefs);
+if (!(prefs.shapeSize > 0)) { prefs.shapeSize = prefs.size.pen; savePrefs(); } // у фигур своя толщина, ручка на неё больше не влияет
 if (!prefs.v9) { prefs.steady = Math.max(prefs.steady ?? 0, 0.85); prefs.v9 = 1; savePrefs(); }
 const me = { id: uid(), get name() { return prefs.name || 'Без имени'; }, get color() { return prefs.color; }, get role() { return prefs.role || ''; } };
 
@@ -315,6 +321,15 @@ function startBoard(room) {
     // Только что добавленные объекты поверх всего — дорисовываем их, не перерисовывая весь лист.
     // Это главное, что держит 60 кадров/с на заполненной доске при быстром письме.
     const added = [...changed].filter((id) => !hadBefore.has(id) && items.has(id));
+    // «Глаз»: собеседник добавил картинку, текст, формулу, фигуру — показываем это по центру
+    if (S.follow && txn.origin && txn.origin.remote && txn.origin.remote.id === S.follow) {
+      const its = added.map((id) => items.get(id)).filter((it) => it.page === S.page && it.type !== 'stroke');
+      if (its.length) {
+        let b = null; for (const it of its) { const w = worldBox(it); b = b ? [Math.min(b[0], w[0]), Math.min(b[1], w[1]), Math.max(b[2], w[2]), Math.max(b[3], w[3])] : w; }
+        const big = its.some((it) => it.type === 'image');
+        queueMicrotask(() => followCenter((b[0] + b[2]) / 2, (b[1] + b[3]) / 2, big ? b : null));
+      }
+    }
     const onPage = added.filter((id) => items.get(id).page === S.page);
     const top = pageItems().slice(-onPage.length).map((it) => it.id);
     const simple = !pvDrop && added.length === changed.size && !S.ov && !S.hidden.size && onPage.every((id) => top.includes(id));
@@ -400,6 +415,7 @@ function startBoard(room) {
   const toScreen = (wx, wy) => [wx * S.view.z + S.view.x, wy * S.view.z + S.view.y];
   let viewSaveT = 0;
   function viewChanged(byUser = true) {
+    if (byUser && flyRaf) { cancelAnimationFrame(flyRaf); flyRaf = 0; } // сами двигаем доску — переезд «глаза» прерываем
     if (byUser && S.follow) { S.follow = null; renderStatus(); }
     invalidate(); updateSelBar();
     clearTimeout(viewSaveT);
@@ -569,10 +585,43 @@ function startBoard(room) {
 
   // Где собеседник сейчас пишет: рамка его последней линии (обновляется, пока он пишет)
   const peerAct = new Map(); // peerId -> { page, sid, x0, y0, x1, y1, t }
+  // Плавный переезд камеры (без рывка), масштаб — какой задан
+  var flyRaf = 0; // var: viewChanged может сработать раньше этой строки
+  function flyTo(v, ms = 260) {
+    cancelAnimationFrame(flyRaf);
+    const v0 = { ...S.view }, t0 = performance.now();
+    const step = (t) => {
+      const k = Math.min(1, (t - t0) / ms), e = 1 - Math.pow(1 - k, 3);
+      // масштаб меняем «по-логарифмически» — приближение/отдаление выглядит равномерным
+      const z = Math.exp(Math.log(v0.z) + (Math.log(v.z) - Math.log(v0.z)) * e);
+      // точка, которую ставим в центр, тоже едет плавно
+      const c0 = [(W / 2 - v0.x) / v0.z, (H / 2 - v0.y) / v0.z], c1 = [(W / 2 - v.x) / v.z, (H / 2 - v.y) / v.z];
+      const cx = c0[0] + (c1[0] - c0[0]) * e, cy = c0[1] + (c1[1] - c0[1]) * e;
+      S.view = { z, x: W / 2 - cx * z, y: H / 2 - cy * z };
+      invalidate(); renderZoom();
+      if (k < 1) flyRaf = requestAnimationFrame(step); else { flyRaf = 0; viewChanged(false); }
+    };
+    flyRaf = requestAnimationFrame(step);
+  }
+  // «Глаз»: то, что собеседник начал рисовать или добавил, — у меня по центру.
+  // Пока он пишет в середине моего экрана, камера стоит (иначе на каждой букве экран дёргался бы).
+  // box — рамка добавленного (картинка): если не помещается при моём масштабе — отдаляемся ровно настолько, чтобы поместилась.
+  function followCenter(x, y, box) {
+    let z = S.view.z;
+    if (box) { const fit = Math.min((W - 160) / Math.max(1, box[2] - box[0]), (H - 260) / Math.max(1, box[3] - box[1])); if (fit < z) z = clamp(fit, 0.08, 12); }
+    const [sx, sy] = toScreen(x, y);
+    const inCenter = sx > W * 0.3 && sx < W * 0.7 && sy > H * 0.3 && sy < H * 0.7;
+    if (inCenter && z === S.view.z && !box) return;
+    if (box && z === S.view.z) { const [a1, b1] = toScreen(box[0], box[1]), [a2, b2] = toScreen(box[2], box[3]); if (inCenter && a1 > 60 && b1 > 110 && a2 < W - 60 && b2 < H - 90) return; }
+    flyTo({ z, x: W / 2 - x * z, y: H / 2 - y * z });
+  }
   function notePeerActivity(id, page, sid, pts) {
     if (!id || !pts || pts.length < 3) return;
     let a = peerAct.get(id);
-    if (!a || a.sid !== sid || a.page !== page) { a = { page, sid, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }; peerAct.set(id, a); }
+    if (!a || a.sid !== sid || a.page !== page) {
+      a = { page, sid, x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }; peerAct.set(id, a);
+      if (S.follow === id && page === S.page) { followCenter(pts[0], pts[1]); a.t = Date.now(); for (let i = 0; i + 2 < pts.length; i += 3) { a.x0 = Math.min(a.x0, pts[i]); a.x1 = Math.max(a.x1, pts[i]); a.y0 = Math.min(a.y0, pts[i + 1]); a.y1 = Math.max(a.y1, pts[i + 1]); } return; }
+    }
     for (let i = 0; i + 2 < pts.length; i += 3) { a.x0 = Math.min(a.x0, pts[i]); a.x1 = Math.max(a.x1, pts[i]); a.y0 = Math.min(a.y0, pts[i + 1]); a.y1 = Math.max(a.y1, pts[i + 1]); }
     a.t = Date.now();
     // режим «глаз»: собеседник пишет за краем моего экрана — плавно переезжаем туда (масштаб свой)
@@ -659,7 +708,6 @@ function startBoard(room) {
           if (pv.hid.has(id)) it = pv.tmp && pv.tmp.find((t) => t.id === id); // правит форму — рамка идёт за новой формой
           if (!it) continue;
           const w = worldBox(it, pv.ov); const [a1, b1] = toScreen(w[0], w[1]), [a2, b2] = toScreen(w[2], w[3]);
-          if (pv.sel.length > 1) { octx.globalAlpha = 0.5; octx.strokeRect(a1 - 2, b1 - 2, a2 - a1 + 4, b2 - b1 + 4); octx.globalAlpha = 1; }
           bb = bb ? [Math.min(bb[0], a1), Math.min(bb[1], b1), Math.max(bb[2], a2), Math.max(bb[3], b2)] : [a1, b1, a2, b2];
         }
         if (bb) { // по пикселям — линия всегда чёткая, не дрожит при движении
@@ -676,11 +724,7 @@ function startBoard(room) {
     if (S.sel.size && !(g && g.hideSel)) {
       const bb = selectionBox();
       octx.strokeStyle = '#4c6ef5'; octx.lineWidth = 1;
-      if (S.sel.size > 1) for (const id of S.sel) {
-        const it = items.get(id); if (!it) continue;
-        const b = worldBox(it, S.ov); const [a1, b1] = toScreen(b[0], b[1]), [a2, b2] = toScreen(b[2], b[3]);
-        octx.globalAlpha = 0.5; octx.strokeRect(a1 - 2, b1 - 2, a2 - a1 + 4, b2 - b1 + 4); octx.globalAlpha = 1;
-      }
+      // несколько объектов — одна общая рамка вокруг всего, без рамки у каждого
       const smo = shapeSel();
       if (smo) { if (!S.ov) drawShapeOverlay(octx, smo.it, smo.k, S.hoverShape); } // правка формы: без рамки, только вершины
       else if (bb) {
@@ -1175,7 +1219,7 @@ function startBoard(room) {
       case 'pen': case 'hl': case 'dpen': return inkGesture(pt, e);
       case 'eraser': return eraserGesture(pt);
       case 'select': return selectGesture(pt, e);
-      case 'line': case 'dline': case 'arrow': case 'rect': case 'ellipse': case 'circle': return shapeGesture(pt);
+      case 'line': case 'dline': case 'arrow': case 'darrow': case 'arrow2': case 'arrowin': case 'rect': case 'ellipse': case 'circle': return shapeGesture(pt);
       default: if (S.tool.startsWith('fig:')) return shapeGesture(pt);
       case 'poly': polyClick(pt); return null;
       case 'text': {
@@ -1411,9 +1455,10 @@ function startBoard(room) {
     const clickOnly = () => Math.hypot(cur[3] - pt[3], cur[4] - pt[4]) < 4;
     const geom = () => {
       let [x0, y0] = pt, [x1, y1] = cur;
-      if (tool === 'line' || tool === 'arrow' || tool === 'dline') {
+      if (LINE_TOOLS.has(tool)) {
         if (shift) { const a = Math.round(Math.atan2(y1 - y0, x1 - x0) / (Math.PI / 12)) * (Math.PI / 12); const d = Math.hypot(x1 - x0, y1 - y0); x1 = x0 + d * Math.cos(a); y1 = y0 + d * Math.sin(a); }
-        return { type: tool === 'dline' ? 'line' : tool, ...(tool === 'dline' ? { dash: true } : {}), x: x0, y: y0, x1: 0, y1: 0, x2: x1 - x0, y2: y1 - y0 };
+        const kind = ARROW_KINDS[tool] ? { type: 'arrow', ...ARROW_KINDS[tool] } : { type: 'line', ...(tool === 'dline' ? { dash: true } : {}) };
+        return { ...kind, x: x0, y: y0, x1: 0, y1: 0, x2: x1 - x0, y2: y1 - y0 };
       }
       if (tool === 'circle') { const r = Math.hypot(x1 - x0, y1 - y0); return { type: 'ellipse', center: true, x: x0 - r, y: y0 - r, w: 2 * r, h: 2 * r }; }
       let w = x1 - x0, h = y1 - y0;
@@ -2491,8 +2536,6 @@ function startBoard(room) {
       if (t === 'eraser') { prefs.eraserPrecise = !prefs.eraserPrecise; savePrefs(); }
     }
     if (poly) finishPoly(false);
-    // фигуру выбрали заново (пришли от другого инструмента) — толщина снова как у ручки
-    if (GROUPS.shapes.tools.includes(t) && !GROUPS.shapes.tools.includes(S.tool) && prefs.shapeSize != null) { prefs.shapeSize = null; savePrefs(); }
     S.tool = t; S.autoBack = null; closeEditors(true);
     if (INK_TOOLS.has(t) && prefs.lastInk !== t) { prefs.lastInk = t; savePrefs(); }
     for (const [gn, g] of Object.entries(GROUPS)) if (g.tools.includes(t)) { prefs['last_' + gn] = t; savePrefs(); }
@@ -2517,6 +2560,8 @@ function startBoard(room) {
   function setSize(k, v, applyToSel, onlySel = false) {
     const c = SIZE_CFG[k]; v = clamp(Math.round(v / c.step) * c.step, c.min, c.max);
     if (!onlySel) { if (k === 'shape') prefs.shapeSize = v; else prefs.size[k] = v; savePrefs(); updateCursor(); }
+    // поменяли толщину выделенных фигур — следующая фигура будет такой же
+    else if (applyToSel && k === 'pen' && [...S.sel].some((id) => SIZED_SHAPES.includes(items.get(id)?.type))) { prefs.shapeSize = v; savePrefs(); }
     queueMicrotask(() => { sizePaint?.(); selBar._sync?.(); });
     if (applyToSel && S.sel.size && k !== 'eraser') {
       act(() => {
@@ -2532,11 +2577,18 @@ function startBoard(room) {
     }
   }
   // Толщина фигур прямо в меню фигур: ползунок с шагом 0,5. Каждый новый выбор фигуры начинается с толщины ручки.
+  // Толщина фигур своя: остаётся последней выбранной (ручка на неё не влияет). Образцы показывают, какой будет линия.
   function shapeSizeRow() {
     const toShape = () => { if (!GROUPS.shapes.tools.includes(S.tool)) { const l = prefs.last_shapes; setTool(l && GROUPS.shapes.tools.includes(l) ? l : 'line', { noToggle: true }); } };
-    const row = sizeRow('shape', () => sz('shape'), (v, final) => { toShape(); setSize('shape', v, false); }, false);
-    const wrap = el('div', { class: 'shape-size', title: 'Толщина фигур' }, el('span', { class: 'ic', html: ICONS.sizeLine }), row.el);
-    sizePaint = row.paint;
+    const row = sizeRow('shape', () => sz('shape'), (v, final) => { toShape(); setSize('shape', v, false); paint(); }, false);
+    const chips = el('div', { class: 'sz-chips sh-chips' });
+    for (const v of SIZE_CFG.shape.presets) chips.append(el('button', { class: 'sz-chip sh-chip', 'data-v': v, title: 'Толщина ' + String(v).replace('.', ','), onclick: () => { toShape(); setSize('shape', v, false); paint(); } },
+      el('span', { class: 'sz-line', style: `height:${clamp(v * 0.9 * 1.1, 1, 13)}px` }), el('span', { class: 'sz-n' }, String(v).replace('.', ','))));
+    const same = el('button', { class: 'btn small sh-same', title: 'Сделать толщину фигур такой же, как у ручки', onclick: () => { toShape(); setSize('shape', prefs.size.pen, false); paint(); } }, 'Как у ручки');
+    const paint = () => { row.paint(); const v = sz('shape'); for (const c of chips.children) c.classList.toggle('on', Math.abs(+c.dataset.v - v) < 1e-6); same.disabled = Math.abs(prefs.size.pen - v) < 1e-6; };
+    const wrap = el('div', { class: 'shape-size', title: 'Толщина фигур' },
+      el('div', { class: 'sh-top' }, el('span', { class: 'ic', html: ICONS.sizeLine }), row.el, same), chips);
+    sizePaint = paint; paint();
     return wrap;
   }
   // Толщина выпадает у своего инструмента: перо, пунктир, маркер, ластик, текст
@@ -2670,7 +2722,7 @@ function startBoard(room) {
       setTool(t);
     }
   });
-  const SPRING_TOOLS = new Set(['select', 'hand', 'pen', 'dpen', 'hl', 'eraser', 'line', 'dline', 'arrow', 'rect', 'ellipse', 'circle']);
+  const SPRING_TOOLS = new Set(['select', 'hand', 'pen', 'dpen', 'hl', 'eraser', 'line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin', 'rect', 'ellipse', 'circle']);
   let spring = null;
   function releaseSpring() {
     const sp = spring; spring = null;
@@ -2947,18 +2999,26 @@ function startBoard(room) {
     closePopovers();
     const p = el('div', { class: 'panel pop' }, content);
     document.body.append(p); popovers.add(p);
-    const r = anchor.getBoundingClientRect(); const pr = p.getBoundingClientRect();
-    const side = toolbar.contains(anchor) ? (prefs.barPos || 'top') : 'top';
-    if (side === 'right') { // слева от кнопки
-      p.style.left = Math.max(8, r.left - 8 - pr.width) + 'px';
-      p.style.top = clamp(r.top, 8, H - pr.height - 8) + 'px';
-    } else if (side === 'left') { // справа от кнопки
-      p.style.left = Math.min(W - pr.width - 8, r.right + 8) + 'px';
-      p.style.top = clamp(r.top, 8, H - pr.height - 8) + 'px';
-    } else {
-      p.style.top = (side === 'bottom' ? Math.max(8, r.top - 8 - pr.height) : r.bottom + 8) + 'px';
-      p.style.left = clamp(align === 'right' ? r.right - pr.width : r.left, 8, W - pr.width - 8) + 'px';
-    }
+    // место окна считаем от его настоящего размера; если содержимое потом поменяло высоту — p.place() ставит заново,
+    // чтобы окно всегда прилегало к своей кнопке (при нижней панели — нижним краем к панели)
+    p.place = () => {
+      const r = anchor.getBoundingClientRect(); const pr = p.getBoundingClientRect();
+      const side = toolbar.contains(anchor) ? (prefs.barPos || 'top') : 'top';
+      // окна у панели инструментов — по центру своей кнопки (у края экрана сдвигаются, чтобы не обрезаться)
+      const onBar = toolbar.contains(anchor);
+      const midX = r.left + r.width / 2 - pr.width / 2, midY = r.top + r.height / 2 - pr.height / 2;
+      if (side === 'right') { // слева от кнопки
+        p.style.left = Math.max(8, r.left - 8 - pr.width) + 'px';
+        p.style.top = clamp(midY, 8, H - pr.height - 8) + 'px';
+      } else if (side === 'left') { // справа от кнопки
+        p.style.left = Math.min(W - pr.width - 8, r.right + 8) + 'px';
+        p.style.top = clamp(midY, 8, H - pr.height - 8) + 'px';
+      } else {
+        p.style.top = (side === 'bottom' ? Math.max(8, r.top - 8 - pr.height) : r.bottom + 8) + 'px';
+        p.style.left = clamp(onBar ? midX : align === 'right' ? r.right - pr.width : r.left, 8, W - pr.width - 8) + 'px';
+      }
+    };
+    p.place();
     p.addEventListener('pointerdown', (e) => e.stopPropagation());
     setTimeout(() => document.addEventListener('pointerdown', function h(e) {
       if (!document.body.contains(p)) { document.removeEventListener('pointerdown', h, true); return; }
@@ -2973,8 +3033,8 @@ function startBoard(room) {
 
   const FIG_IDS = Object.keys(FIGS).map((k) => 'fig:' + k);
   const GROUPS = {
-    shapes: { tools: ['line', 'dline', 'arrow', 'rect', 'ellipse', 'circle', 'poly', ...FIG_IDS], name: 'Фигуры',
-      sections: [['Основные', ['line', 'dline', 'arrow', 'rect', 'ellipse', 'circle', 'poly']],
+    shapes: { tools: ['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin', 'rect', 'ellipse', 'circle', 'poly', ...FIG_IDS], name: 'Фигуры',
+      sections: [['Основные', ['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin', 'rect', 'ellipse', 'circle', 'poly']],
         ['Планиметрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'plane')],
         ['Стереометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'solid')]] },
     more: { tools: ['note', 'image'], name: 'Ещё', sections: [['', ['note', 'image']]] },
@@ -3053,7 +3113,7 @@ function startBoard(room) {
         // Список открывается сам, если задержать курсор на кнопке (полоска внизу показывает отсчёт)
         btn.style.setProperty('--hover-ms', HOVER_MS + 'ms');
         btn.addEventListener('pointerenter', (e) => {
-          if (e.pointerType === 'touch' || popOpen(gname)) return;
+          if (e.pointerType !== 'mouse' || popOpen(gname)) return; // перо и палец над панелью окна сами не открывают
           clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { btn.classList.remove('hovering'); openGroup(); }, HOVER_MS);
         });
         btn.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); btn.classList.remove('hovering'); scheduleGroupClose(e); });
@@ -3065,8 +3125,7 @@ function startBoard(room) {
         };
         const openGroup = () => {
           cancelGroupClose();
-          const pop = popover(btn, [
-            ...grp.sections.map(([title, ids]) => [
+          const secs = grp.sections.map(([title, ids]) => [
               title ? el('div', { class: 'mh' }, title) : null,
               el('div', { class: gname === 'more' ? 'mlist' : 'fig-grid' }, ids.map((t) => {
                 const d = toolDef(t);
@@ -3077,9 +3136,17 @@ function startBoard(room) {
                   el('span', { class: 'ic', html: iconHtml(t) }));
                 return bb;
               })),
-            ]).flat(),
-            gname === 'shapes' ? shapeSizeRow() : null,
-          ]);
+            ]).flat();
+          // фигуры: список прокручивается (стереометрия — ниже, колесом), толщина всегда видна внизу
+          const scroll = gname === 'shapes' ? el('div', { class: 'fig-scroll' }, secs) : null;
+          const pop = popover(btn, scroll ? [scroll, shapeSizeRow()] : secs);
+          if (scroll) {
+            pop.classList.add('fig-pop');
+            const stereo = [...scroll.querySelectorAll('.mh')].find((h) => /стерео/i.test(h.textContent));
+            if (stereo) { scroll.style.maxHeight = Math.max(120, stereo.offsetTop - scroll.offsetTop + 22) + 'px'; } // виден краешек заголовка — понятно, что ниже есть ещё
+            scroll.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+            pop.place(); // высота стала меньше — придвигаем окно к кнопке
+          }
           hoverPop(pop, btn, gname);
         };
         toolbar.append(btn);
@@ -3091,13 +3158,15 @@ function startBoard(room) {
         // повторный щелчок по выбранному перу/ластику/тексту — открыть толщину
         onclick: () => {
           clearTimeout(hoverTimer);
-          if (S.tool !== t.id || !SIZE_OF[t.id]) setTool(t.id); // V ещё раз — лассо, как раньше
-          if (SIZE_OF[t.id] && !popOpen('size:' + t.id)) { const nb = toolbar.querySelector(`[data-grp="size:${t.id}"]`) || tb; openSizePop(t.id, nb); }
+          const wasOn = S.tool === t.id;
+          if (!wasOn || !SIZE_OF[t.id]) setTool(t.id); // V ещё раз — лассо, как раньше
+          // пером и пальцем: первое касание — только выбрать инструмент, окно толщины — по второму касанию
+          if (SIZE_OF[t.id] && !popOpen('size:' + t.id) && (wasOn || !penTapNow)) { const nb = toolbar.querySelector(`[data-grp="size:${t.id}"]`) || tb; openSizePop(t.id, nb); }
         },
       }, icon(toolIcon(t.id)));
       if (SIZE_OF[t.id]) {
         tb.addEventListener('pointerenter', (e) => {
-          if (e.pointerType === 'touch' || popOpen('size:' + t.id)) return;
+          if (e.pointerType !== 'mouse' || popOpen('size:' + t.id)) return;
           clearTimeout(hoverTimer); hoverTimer = setTimeout(() => openSizePop(t.id, tb), HOVER_MS);
         });
         tb.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); scheduleGroupClose(e); });
@@ -3113,7 +3182,7 @@ function startBoard(room) {
       // сбоку цвета не занимают полпанели: одна кнопка текущего цвета, палитра — при наведении
       const cb = el('button', { class: 'tbtn cur-color', 'data-grp': 'colors', title: 'Цвет (1–8)' }, el('span', { class: 'swatch', style: `--c:${cur}` }));
       const openColors = () => { const pop = popover(cb, [el('div', { class: 'palette' }, colorBtns())]); pop.classList.add('pal-pop'); hoverPop(pop, cb, 'colors'); };
-      cb.addEventListener('pointerenter', (e) => { if (e.pointerType === 'touch' || popOpen('colors')) return; clearTimeout(hoverTimer); hoverTimer = setTimeout(openColors, HOVER_MS); });
+      cb.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'mouse' || popOpen('colors')) return; clearTimeout(hoverTimer); hoverTimer = setTimeout(openColors, HOVER_MS); });
       cb.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); scheduleGroupClose(e); });
       cb.onclick = () => { clearTimeout(hoverTimer); if (!popOpen('colors')) openColors(); };
       toolbar.append(cb);
@@ -3122,6 +3191,27 @@ function startBoard(room) {
     if (toolbar.userScrolled) { toolbar.scrollLeft = keepScroll[0]; toolbar.scrollTop = keepScroll[1]; } else centerCore();
   }
   // Узкий экран: панель прокручивается — сразу показываем середину (ручку, ластик), а не край
+  // Кнопки — сразу по касанию. Перо и палец при нажатии почти всегда чуть сдвигаются, и браузер тогда
+  // не считает это щелчком: кнопка «не реагирует с первого раза». Срабатываем сами, как только перо оторвали над кнопкой.
+  let fastTap = null, fastDone = null; var penTapNow = false;
+  document.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' || e.button > 0) { fastTap = null; return; }
+    const b = e.target.closest?.('button'); fastTap = b && !b.disabled && b.closest('.bar, .pop, .panel, .modal') ? { b, id: e.pointerId } : null;
+  }, true);
+  document.addEventListener('pointerup', (e) => {
+    const f = fastTap; fastTap = null; if (!f || f.id !== e.pointerId || !document.body.contains(f.b)) return;
+    const over = document.elementFromPoint(e.clientX, e.clientY);
+    if (!over || !(over === f.b || f.b.contains(over))) return;
+    fastDone = { b: f.b, t: performance.now() };
+    penTapNow = true; try { f.b.click(); } finally { penTapNow = false; }
+  }, true);
+  // настоящий щелчок, который браузер пришлёт следом, — уже лишний
+  document.addEventListener('click', (e) => {
+    if (!e.isTrusted || !fastDone) return;
+    // кнопка могла уже перерисоваться (новый элемент на том же месте) — гасим любой щелчок пера/пальца сразу после касания
+    if (performance.now() - fastDone.t < 700 && (e.pointerType !== 'mouse' || e.target === fastDone.b || fastDone.b.contains(e.target))) { e.stopImmediatePropagation(); e.preventDefault(); }
+    fastDone = null;
+  }, true);
   // Правая кнопка по свободному месту панели (не по кнопке) — настройка кнопок
   toolbar.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -3276,8 +3366,8 @@ function startBoard(room) {
     const d = modal('Что нового', body); d.m.querySelector('.dialog').classList.add('rel-dialog');
   }
   const relAt = (() => { const m = /^(\d{4})\.(\d\d)\.(\d\d)-(\d\d)(\d\d)(\d\d)$/.exec(__VERSION__); return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : 0; })();
-  const whatsNew = el('button', { class: 'bar whatsnew', onclick: () => showRelease() }, el('span', { class: 'wn-dot' }), 'Что нового');
-  if (relAt && Date.now() - relAt < 24 * 3600 * 1000) { app.append(whatsNew); setTimeout(() => whatsNew.remove(), Math.max(0, relAt + 24 * 3600 * 1000 - Date.now())); }
+  var whatsNew = el('button', { class: 'bar whatsnew', onclick: () => showRelease() }, el('span', { class: 'wn-dot' }), 'Что нового');
+  if (relAt && Date.now() - relAt < 24 * 3600 * 1000) { app.append(whatsNew); placeWhatsNew(); setTimeout(() => whatsNew.remove(), Math.max(0, relAt + 24 * 3600 * 1000 - Date.now())); }
   // Новая версия на сайте: тихо проверяем раз в несколько минут и при возврате на вкладку
   if (location.protocol.startsWith('http')) {
     let shown = false;
@@ -3323,6 +3413,15 @@ function startBoard(room) {
   // названия или статуса она не сдвигается ни на пиксель.
   const LEFT_MAX = 490, RIGHT_W = 430, BAR_LIFT = 30; // слева: название, листы и стрелки отмены
   // Панель: сверху (по умолчанию), снизу или справа — выбирается в меню
+  // «Что нового» — справа сверху, под кнопкой выхода; если там панель инструментов — рядом с ней, не поверх
+  function placeWhatsNew() {
+    if (!whatsNew || !whatsNew.isConnected) return; // var: может вызваться раньше, чем кнопка создана
+    const tr = topRight.getBoundingClientRect(), tb = toolbar.getBoundingClientRect(), wn = whatsNew.getBoundingClientRect();
+    let right = 10, top = tr.bottom + 8;
+    const hit = () => { const l = W - right - wn.width, rr = W - right; return !(rr <= tb.left || l >= tb.right || top + wn.height <= tb.top || top >= tb.bottom); };
+    if (hit()) { if (toolbar.classList.contains('vert')) right = W - tb.left + 8; else top = tb.bottom + 8; }
+    whatsNew.style.right = Math.round(right) + 'px'; whatsNew.style.top = Math.round(top) + 'px';
+  }
   function placeUndo() {
     const tl = topLeft.getBoundingClientRect(), tr = topRight.getBoundingClientRect();
     const urW = 2 * 36 + 10; // две кнопки и поля
@@ -3338,7 +3437,7 @@ function startBoard(room) {
   }
   new ResizeObserver(() => placeUndo()).observe(topLeft);
   function layoutBars() {
-    placeUndo();
+    placeUndo(); queueMicrotask(placeWhatsNew);
     const pos = prefs.barPos || 'top';
     toolbar.classList.toggle('vert', pos === 'right' || pos === 'left');
     document.body.dataset.bar = pos;

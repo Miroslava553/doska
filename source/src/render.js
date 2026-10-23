@@ -201,7 +201,7 @@ export function localBox(it) {
       const r = it.size / 2 + 1; b = [x0 - r, y0 - r, x1 + r, y1 + r]; break;
     }
     case 'line': case 'arrow': {
-      const r = it.size * (it.type === 'arrow' ? 4 : 1) + 2;
+      const r = (it.type === 'arrow' ? Math.max(10, it.size * 4) : it.size) + 2;
       b = [Math.min(it.x1, it.x2) - r, Math.min(it.y1, it.y2) - r, Math.max(it.x1, it.x2) + r, Math.max(it.y1, it.y2) + r]; break;
     }
     case 'rect': case 'ellipse': { const r = it.size / 2 + 1; b = [-r, -r, it.w + r, it.h + r]; break; }
@@ -432,6 +432,13 @@ function rightMark(ctx, it) {
     ctx.moveTo(v[0] + e1[0], v[1] + e1[1]); ctx.lineTo(v[0] + e1[0] + e2[0], v[1] + e1[1] + e2[1]); ctx.lineTo(v[0] + e2[0], v[1] + e2[1]); ctx.stroke();
   }
 }
+// концы стрелки: обычная — на конце; 'both' — на обоих концах наружу; 'in' — на обоих концах внутрь (двояковогнутая линза)
+function arrowHeads(ctx, it) {
+  const { x1, y1, x2, y2, size } = it;
+  if (it.heads === 'both') { arrowHead(ctx, x1, y1, x2, y2, size); arrowHead(ctx, x2, y2, x1, y1, size); }
+  else if (it.heads === 'in') { arrowHead(ctx, 2 * x2 - x1, 2 * y2 - y1, x2, y2, size); arrowHead(ctx, 2 * x1 - x2, 2 * y1 - y2, x1, y1, size); }
+  else arrowHead(ctx, x1, y1, x2, y2, size);
+}
 function arrowHead(ctx, x1, y1, x2, y2, size) {
   const a = Math.atan2(y2 - y1, x2 - x1); const L = Math.max(10, size * 4);
   ctx.beginPath();
@@ -449,7 +456,12 @@ export function shapePolys(it) {
   const head = (x1, y1, x2, y2, L, k) => { const a = Math.atan2(y2 - y1, x2 - x1); return [[x2 - L * Math.cos(a - k), y2 - L * Math.sin(a - k)], [x2, y2], [x2 - L * Math.cos(a + k), y2 - L * Math.sin(a + k)]]; };
   if (it.type === 'line' || it.type === 'arrow') {
     add([[it.x1, it.y1], [it.x2, it.y2]], it.dash);
-    if (it.type === 'arrow') add(head(it.x1, it.y1, it.x2, it.y2, Math.max(10, it.size * 4), 0.45), false);
+    if (it.type === 'arrow') {
+      const L = Math.max(10, it.size * 4), { x1, y1, x2, y2 } = it;
+      if (it.heads === 'both') { add(head(x1, y1, x2, y2, L, 0.45), false); add(head(x2, y2, x1, y1, L, 0.45), false); }
+      else if (it.heads === 'in') { add(head(2 * x2 - x1, 2 * y2 - y1, x2, y2, L, 0.45), false); add(head(2 * x1 - x2, 2 * y1 - y2, x1, y1, L, 0.45), false); }
+      else add(head(x1, y1, x2, y2, L, 0.45), false);
+    }
   } else if (it.type === 'rect') add([[0, 0], [it.w, 0], [it.w, it.h], [0, it.h], [0, 0]], it.dash);
   else if (it.type === 'ellipse') {
     add(ell(it.w / 2, it.h / 2, Math.abs(it.w / 2), Math.abs(it.h / 2), 0, Math.PI * 2), it.dash);
@@ -528,7 +540,7 @@ export function drawItem(ctx, it, ov, scale, pieces) {
       ctx.lineWidth = it.size; if (it.dash) ctx.setLineDash([it.size * 3, it.size * 2.5]);
       ctx.beginPath(); ctx.moveTo(it.x1, it.y1); ctx.lineTo(it.x2, it.y2); ctx.stroke();
       ctx.setLineDash([]);
-      if (it.type === 'arrow') arrowHead(ctx, it.x1, it.y1, it.x2, it.y2, it.size);
+      if (it.type === 'arrow') arrowHeads(ctx, it);
       break;
     }
     case 'rect': case 'ellipse': {
