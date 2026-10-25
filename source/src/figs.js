@@ -21,6 +21,7 @@ const capH = (it, h) => Math.max(4, Math.min(it.w * 20, h));
 const parOff = (it) => (it.ang == null ? 0.28 * it.w : it.h / Math.tan(it.ang * DEG)); // сдвиг верхней стороны
 export const FIGS = {
   // ---- планиметрия ----
+  scalene: { name: 'Произвольный треугольник', g: 'plane', prims: poly([[0.32, 0], [1, 1], [0, 1]]) },
   triangle: { name: 'Равнобедренный треугольник', g: 'plane', prims: poly([[0.5, 0], [1, 1], [0, 1]]),
     angle: { label: 'Угол при вершине', min: 10, max: 170, get: (it) => 2 * Math.atan(it.w / 2 / it.h) / DEG, set: (it, d) => bottomH(it, capH(it, it.w / 2 / Math.tan((d * DEG) / 2))) } },
   eqtriangle: { name: 'Равносторонний треугольник', g: 'plane', aspect: Math.sqrt(3) / 2, prims: poly([[0.5, 0], [1, 1], [0, 1]]) },

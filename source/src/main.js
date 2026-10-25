@@ -3,7 +3,7 @@ import { IndexeddbPersistence } from 'y-indexeddb';
 import { Hub, ManualConnect } from './sync.js';
 import {
   decodePts, encodePts, strokeOptions, outlinePath, paintInk, localBox, worldBox, geomWorldBox, itemTransform, hitItem, distSeg,
-  drawItem, drawBackground, setAsyncLoad, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf, bakeShape, SCALE_BAKED,
+  drawItem, drawBackground, setAsyncLoad, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf, rotCenter, bakeShape, SCALE_BAKED,
 } from './render.js';
 import { compileMany } from './expr.js';
 import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, solidEdges, regularSolid } from './solid.js';
@@ -887,6 +887,77 @@ function startBoard(room) {
   // 0–3 углы (пропорционально), 4–7 середины сторон (верх, право, низ, лево — растянуть по одной оси)
   // Отступ рамки: если у фигуры есть точки-вершины, рамка отходит дальше — углы рамки не налезают на вершины
   const selPad = () => { const e = editSel(); return !e || e.k === 'rot' ? 5 : e.k === 'line' ? 14 : 10; };
+  // Поворот всего выделенного — как у фигур: зона чуть снаружи любого угла рамки (курсор-дуга). Ловить легко: до 34 px от угла.
+  const ROT_ZONE = 34;
+  function rotCornerAt(bb, x, y) {
+    if (!bb || shapeSel() || editSel() || ![...S.sel].some((id) => { const it = items.get(id); return it && !it.locked; })) return -1;
+    const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]); const P = selPad();
+    const C = [[x0 - P, y0 - P], [x1 + P, y0 - P], [x1 + P, y1 + P], [x0 - P, y1 + P]], out = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
+    for (let k = 0; k < 4; k++) {
+      const [cx, cy] = C[k], dc = Math.hypot(x - cx, y - cy);
+      if (dc > 4 && dc < ROT_ZONE && (x - cx) * out[k][0] > -6 && (y - cy) * out[k][1] > -6) return k;
+    }
+    return -1;
+  }
+  // Повернуть объект на угол th (радианы, по часовой) вокруг точки C (мир)
+  function rotateFields(it, th, C) {
+    const c = Math.cos(th), si = Math.sin(th), deg = th * 180 / Math.PI;
+    const R = ([x, y]) => [C[0] + (x - C[0]) * c - (y - C[1]) * si, C[1] + (x - C[0]) * si + (y - C[1]) * c];
+    const s = it.s || 1;
+    const rebase = (W) => { let x0 = Infinity, y0 = Infinity; for (const [x, y] of W) { x0 = Math.min(x0, x); y0 = Math.min(y0, y); } return [x0, y0]; };
+    if (it.type === 'stroke') {
+      const q = it.q || 10; const P = decodePts(it).map(([px, py, pr]) => [...R([it.x + px * s, it.y + py * s]), pr]);
+      let [x0, y0] = rebase(P); x0 = Math.floor(x0 * q) / q; y0 = Math.floor(y0 * q) / q;
+      return { x: x0, y: y0, pts: encodePts(P.map(([x, y, pr]) => [(x - x0) / s, (y - y0) / s, pr]), q) };
+    }
+    if (it.type === 'poly') { const P = it.pts.map(([px, py]) => R([it.x + px * s, it.y + py * s])); const [x0, y0] = rebase(P); return { x: x0, y: y0, pts: P.map(([x, y]) => [(x - x0) / s, (y - y0) / s]) }; }
+    if (it.type === 'line' || it.type === 'arrow') {
+      const A = R([it.x + it.x1 * s, it.y + it.y1 * s]), B = R([it.x + it.x2 * s, it.y + it.y2 * s]);
+      return { x: A[0], y: A[1], x1: 0, y1: 0, x2: (B[0] - A[0]) / s, y2: (B[1] - A[1]) / s };
+    }
+    if (it.type === 'rect') { // прямоугольник после поворота — многоугольник с теми же свойствами (его можно выровнять обратно)
+      const P = [[0, 0], [it.w, 0], [it.w, it.h], [0, it.h]].map(([px, py]) => R([it.x + px * s, it.y + py * s])); const [x0, y0] = rebase(P);
+      return { type: 'poly', closed: true, fk: 'rect', x: x0, y: y0, s: 1, size: it.size * s, pts: P.map(([x, y]) => [x - x0, y - y0]), w: null, h: null };
+    }
+    if (it.type === 'fig' && SOLID_KINDS.has(it.kind)) { // тело: поворачиваем в плоскости экрана и переносим центр
+      const base = prepared(it), v0 = viewOf(base);
+      const r = reproject(base, { ...v0, roll: (v0.roll || 0) - deg }, base.m);
+      const nt = { ...it, ...r }; const b0 = worldBox(it), b1 = worldBox(nt);
+      const c0 = R([(b0[0] + b0[2]) / 2, (b0[1] + b0[3]) / 2]), c1 = [(b1[0] + b1[2]) / 2, (b1[1] + b1[3]) / 2];
+      return { ...r, x: r.x + c0[0] - c1[0], y: r.y + c0[1] - c1[1] };
+    }
+    // остальное (эллипс, фигуры, текст, формулы, графики, картинки) — поворот вокруг своего центра + перенос центра
+    const [rcx, rcy] = rotCenter(it); const cw = [it.x + rcx * s, it.y + rcy * s], cn = R(cw);
+    let rot = ((it.rot || 0) + deg) % 360; if (rot > 180) rot -= 360; if (rot < -180) rot += 360;
+    return { x: it.x + cn[0] - cw[0], y: it.y + cn[1] - cw[1], rot: Math.abs(rot) < 1e-6 ? 0 : Math.round(rot * 1000) / 1000 };
+  }
+  function rotateGesture(pt, bb, k = 2) {
+    const ids = [...S.sel].filter((id) => { const it = items.get(id); return it && !it.locked; });
+    const C = [(bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2];
+    const a0 = Math.atan2(pt[1] - C[1], pt[0] - C[0]);
+    let th = 0;
+    S.hidden = new Set(ids); cvOver.style.cursor = rotateCursor(k); invalidate();
+    const snap = (t, ev) => { let d = t * 180 / Math.PI; if (ev?.shiftKey) d = Math.round(d / 15) * 15; else { const n = Math.round(d / 90) * 90; if (Math.abs(d - n) < 4) d = n; } return d * Math.PI / 180; };
+    return {
+      hideSel: true, rotC: C,
+      rotAngle: () => th,
+      drawScreen() {}, // пока крутим — панель над выделенным спрятана
+      move(p, ev) { let t = Math.atan2(p[1] - C[1], p[0] - C[0]) - a0; while (t > Math.PI) t -= 2 * Math.PI; while (t < -Math.PI) t += 2 * Math.PI; th = snap(t, ev); invalidate(false); },
+      drawOver(c) {
+        c.save(); c.translate(C[0], C[1]); c.rotate(th); c.translate(-C[0], -C[1]);
+        for (const id of ids) { const it = items.get(id); if (it) drawItem(c, it, null, S.view.z); }
+        c.restore();
+      },
+      pvTmp: () => ids.map((id) => items.get(id)).filter(Boolean).map((it) => ({ ...it, ...rotateFields(it, th, C) })),
+      end() {
+        S.hidden = new Set(); updateCursor();
+        if (Math.abs(th) > 1e-4) act(() => { for (const id of ids) { const it = items.get(id); if (!it) continue; const f = rotateFields(it, th, C);
+          if (f.type && f.type !== it.type) { const { _lb, _segs, _sv, _pts, _path, _rc, ...plain } = it; yItems.delete(id); addItem({ ...plain, ...f, id, w: undefined, h: undefined }); } else setFields(id, f); } });
+        invalidate();
+      },
+      cancel() { S.hidden = new Set(); invalidate(); },
+    };
+  }
   function handles(bb) {
     const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]); const P = selPad();
     const its = [...S.sel].map((id) => items.get(id)).filter(Boolean);
@@ -1050,6 +1121,7 @@ function startBoard(room) {
   let lastPenHover = null;
   function onMove(e) {
     if (penRec) recEv('move', e);
+    if (e.pointerType === 'pen') penSeenAt = Date.now();
     if (e.pointerType === 'pen' && !e.buttons) lastPenHover = { x: e.clientX, y: e.clientY, t: e.timeStamp };
     if (e.pointerType !== 'touch') {
       const pr = readPoint(e, e.pointerType)[2];
@@ -1148,6 +1220,8 @@ function startBoard(room) {
         const bb = selectionBox();
         if (bb) {
           const hi = sm ? -1 : handleAt(bb, x, y);
+          const rk = hi < 0 && !sm ? rotCornerAt(bb, x, y) : -1;
+          if (rk >= 0) { cvOver.style.cursor = rotateCursor(rk); return; }
           if (hi >= 0) c = handleCursor(hi);
           else { const [wx, wy] = toWorld(x, y); if (wx >= bb[0] && wx <= bb[2] && wy >= bb[1] && wy <= bb[3]) c = moveCursor(); }
         }
@@ -1620,7 +1694,7 @@ function startBoard(room) {
     const out = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
     for (let k = 0; k < 4; k++) {
       const [cx, cy] = H.corners[k], dc = Math.hypot(x - cx, y - cy);
-      if (dc > 4 && dc < 24 && (x - cx) * out[k][0] > -3 && (y - cy) * out[k][1] > -3) return { mode: 'roll', c: H.c, k };
+      if (dc > 4 && dc < ROT_ZONE && (x - cx) * out[k][0] > -6 && (y - cy) * out[k][1] > -6) return { mode: 'roll', c: H.c, k };
     }
     if (H.orbit && d(H.orbit) < 12) return { mode: 'orbit' };
     return null;
@@ -1646,13 +1720,7 @@ function startBoard(room) {
   }
   // Точка вершины, за которую тянут: крупная, залитая, ровно на вершине
   function vertexDot(c, x, y) { c.save(); c.fillStyle = '#4c6ef5'; c.strokeStyle = '#fff'; c.lineWidth = 2; c.beginPath(); c.arc(x, y, 6, 0, Math.PI * 2); c.fill(); c.stroke(); c.restore(); }
-  // Подпись угла рядом с курсором, пока поворачиваете
-  function drawAngleTag(c, deg, sx, sy) {
-    const t = (Math.round(((deg % 360) + 540) % 360 - 180)) + '°';
-    c.save(); c.font = '600 12px system-ui, sans-serif'; const w = c.measureText(t).width + 12;
-    c.fillStyle = 'rgba(33,37,41,.88)'; c.beginPath(); c.roundRect(sx + 16, sy + 14, w, 20, 6); c.fill();
-    c.fillStyle = '#fff'; c.fillText(t, sx + 22, sy + 28); c.restore();
-  }
+  function drawAngleTag() {} // подписи угла при повороте нет — не нужна
   // Поворот и вершины у плоских фигур
   function editGesture(e, hit, pt) {
     if (e.k === 'solid') return solidGesture(e.it, hit, pt);
@@ -1779,6 +1847,7 @@ function startBoard(room) {
       const bb = selectionBox();
       const hs = handles(bb);
       const hi = handleAt(bb, sx, sy);
+      if (hi < 0) { const rk = rotCornerAt(bb, sx, sy); if (rk >= 0) return rotateGesture(pt, bb, rk); }
       // масштаб считаем от рамки самой геометрии (без запаса на толщину линий) — размеры точные, ничего не «уплывает»
       let gb = null;
       for (const id of S.sel) { const it = items.get(id); if (!it) continue; const w = geomWorldBox(it); gb = gb ? [Math.min(gb[0], w[0]), Math.min(gb[1], w[1]), Math.max(gb[2], w[2]), Math.max(gb[3], w[3])] : w; }
@@ -1881,6 +1950,7 @@ function startBoard(room) {
     const base = new Set(S.sel);
     const lasso = false; const path = [[pt[0], pt[1]]]; let cur = pt;
     const g = {
+      autoScroll: true, // рамка дошла до края экрана — доска едет, выделение продолжается
       move(p) { cur = p; if (lasso) path.push([p[0], p[1]]); update(); },
       pvMarq: () => [pt[0], pt[1], cur[0], cur[1]],
       drawScreen(c) {
@@ -2174,6 +2244,7 @@ function startBoard(room) {
     if (it.type === 'fig') return FIGS[it.kind]?.aspect ? it.kind : null; // у остальных пропорции любые — фигура всегда «та»
     if (it.type === 'poly' && it.closed && it.pts.length >= 3) {
       const n = it.pts.length, fk = it.fk;
+      if (fk === 'scalene') return null; // произвольный треугольник «выравнивать» не во что
       const quad = { rect: 1, square: 1, parallelogram: 1, rhombus: 1, trapezoid: 1 }, tri = { triangle: 1, eqtriangle: 1, rtriangle: 1, inscribed: 1, circumscribed: 1 };
       if (fk && quad[fk] && n === 4) return fk;
       if (fk && tri[fk] && n === 3) return fk;
@@ -2337,7 +2408,7 @@ function startBoard(room) {
     if (single) {
       const it = single; const set = (f) => act(() => setFields(it.id, f));
       const keepBottom = (h) => ({ y: it.y + (it.h - h) * (it.s || 1), h });
-      if (it.type === 'fig' && ['triangle', 'eqtriangle', 'rtriangle'].includes(it.kind)) {
+      if (it.type === 'fig' && ['scalene', 'triangle', 'eqtriangle', 'rtriangle'].includes(it.kind)) {
         if (it.kind !== 'eqtriangle') add('fig:eqtriangle', 'Сделать равносторонним', 'Все стороны равны', () => set({ kind: 'eqtriangle', ...keepBottom(it.w * SQ3) }));
         if (it.kind !== 'triangle') add('fig:triangle', 'Сделать равнобедренным', 'Две боковые стороны равны', () => set({ kind: 'triangle' }));
         if (it.kind !== 'rtriangle') add('fig:rtriangle', 'Сделать прямоугольным', 'С прямым углом', () => set({ kind: 'rtriangle' }));
@@ -2532,6 +2603,8 @@ function startBoard(room) {
   // ---------- инструменты и клавиши ----------
   function setTool(t, opts = {}) {
     if (t === 'image') { pickFile(null); return; }
+    // ластик при выделенном — стираем выделенное (как Delete), дальше — обычный ластик
+    if (t === 'eraser' && S.tool === 'select' && S.sel.size && !opts.keepSel) { const n = [...S.sel].filter((id) => !items.get(id)?.locked).length; if (n) { S.sel = new Set([...S.sel].filter((id) => !items.get(id)?.locked)); deleteSelection(); toast(n === 1 ? 'Выделенное стёрто' : `Стёрто: ${n}`); } }
     if (S.tool === t && !opts.noToggle && !(t === 'select' && S.autoBack)) { // V при автовыделении — просто остаёмся в выделении
       if (t === 'eraser') { prefs.eraserPrecise = !prefs.eraserPrecise; savePrefs(); }
     }
@@ -3114,7 +3187,7 @@ function startBoard(room) {
         btn.style.setProperty('--hover-ms', HOVER_MS + 'ms');
         btn.addEventListener('pointerenter', (e) => {
           if (e.pointerType !== 'mouse' || popOpen(gname)) return; // перо и палец над панелью окна сами не открывают
-          clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { btn.classList.remove('hovering'); openGroup(); }, HOVER_MS);
+          clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { btn.classList.remove('hovering'); if (btn.isConnected && btn.matches(':hover') && !gesture) openGroup(); }, HOVER_MS);
         });
         btn.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); btn.classList.remove('hovering'); scheduleGroupClose(e); });
         // щелчок: выбрать (если это фигуры) и оставить окно открытым — закроется, когда уведёте курсор
@@ -3167,7 +3240,7 @@ function startBoard(room) {
       if (SIZE_OF[t.id]) {
         tb.addEventListener('pointerenter', (e) => {
           if (e.pointerType !== 'mouse' || popOpen('size:' + t.id)) return;
-          clearTimeout(hoverTimer); hoverTimer = setTimeout(() => openSizePop(t.id, tb), HOVER_MS);
+          clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { if (tb.isConnected && tb.matches(':hover') && !gesture) openSizePop(t.id, tb); }, HOVER_MS); // только если курсор всё ещё на кнопке
         });
         tb.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); scheduleGroupClose(e); });
       }
@@ -3182,7 +3255,7 @@ function startBoard(room) {
       // сбоку цвета не занимают полпанели: одна кнопка текущего цвета, палитра — при наведении
       const cb = el('button', { class: 'tbtn cur-color', 'data-grp': 'colors', title: 'Цвет (1–8)' }, el('span', { class: 'swatch', style: `--c:${cur}` }));
       const openColors = () => { const pop = popover(cb, [el('div', { class: 'palette' }, colorBtns())]); pop.classList.add('pal-pop'); hoverPop(pop, cb, 'colors'); };
-      cb.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'mouse' || popOpen('colors')) return; clearTimeout(hoverTimer); hoverTimer = setTimeout(openColors, HOVER_MS); });
+      cb.addEventListener('pointerenter', (e) => { if (e.pointerType !== 'mouse' || popOpen('colors')) return; clearTimeout(hoverTimer); hoverTimer = setTimeout(() => { if (cb.isConnected && cb.matches(':hover') && !gesture) openColors(); }, HOVER_MS); });
       cb.addEventListener('pointerleave', (e) => { clearTimeout(hoverTimer); scheduleGroupClose(e); });
       cb.onclick = () => { clearTimeout(hoverTimer); if (!popOpen('colors')) openColors(); };
       toolbar.append(cb);
@@ -3194,7 +3267,10 @@ function startBoard(room) {
   // Кнопки — сразу по касанию. Перо и палец при нажатии почти всегда чуть сдвигаются, и браузер тогда
   // не считает это щелчком: кнопка «не реагирует с первого раза». Срабатываем сами, как только перо оторвали над кнопкой.
   let fastTap = null, fastDone = null; var penTapNow = false;
+  let palmAt = 0;
   document.addEventListener('pointerdown', (e) => {
+    // ладонь: пишут пером, а рука касается панели — такие касания не считаем нажатием кнопки
+    if (e.pointerType === 'touch' && (Date.now() - penSeenAt < 1500 || (gesture && !gesture.touch)) && e.target.closest?.('.bar, .pop')) { fastTap = null; palmAt = performance.now(); e.preventDefault(); e.stopPropagation(); return; }
     if (e.pointerType === 'mouse' || e.button > 0) { fastTap = null; return; }
     const b = e.target.closest?.('button'); fastTap = b && !b.disabled && b.closest('.bar, .pop, .panel, .modal') ? { b, id: e.pointerId } : null;
   }, true);
@@ -3207,6 +3283,7 @@ function startBoard(room) {
   }, true);
   // настоящий щелчок, который браузер пришлёт следом, — уже лишний
   document.addEventListener('click', (e) => {
+    if (e.isTrusted && e.pointerType === 'touch' && performance.now() - palmAt < 900) { e.stopImmediatePropagation(); e.preventDefault(); return; }
     if (!e.isTrusted || !fastDone) return;
     // кнопка могла уже перерисоваться (новый элемент на том же месте) — гасим любой щелчок пера/пальца сразу после касания
     if (performance.now() - fastDone.t < 700 && (e.pointerType !== 'mouse' || e.target === fastDone.b || fastDone.b.contains(e.target))) { e.stopImmediatePropagation(); e.preventDefault(); }

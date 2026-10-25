@@ -181,9 +181,17 @@ function wrap(text, maxW, font) {
 
 // ---------- рамки ----------
 // Поворот на доске для эллипса и плоских фигур без вершин (вписанная/описанная окружность, оси): поле rot, градусы, вокруг центра
-export const rotOf = (it) => ((it.type === 'ellipse' || (it.type === 'fig' && !SOLID_KINDS.has(it.kind))) && it.rot ? it.rot : 0);
+// Поворот вокруг своего центра: эллипс, фигуры, а также текст, формулы, графики, картинки, стикеры
+const ROT_TYPES = new Set(['ellipse', 'text', 'tex', 'graph', 'image', 'note']);
+export const rotOf = (it) => ((ROT_TYPES.has(it.type) || (it.type === 'fig' && !SOLID_KINDS.has(it.kind))) && it.rot ? it.rot : 0);
+export function rotCenter(it) {
+  if (it.type === 'rect' || it.type === 'ellipse' || it.type === 'fig') return [it.w / 2, it.h / 2];
+  if (it._rc) return it._rc;
+  const { rot, _lb, _rc, ...plain } = it; const b = localBox(plain);
+  it._rc = [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]; return it._rc;
+}
 export function rotPt(it, x, y, sign = 1) {
-  const a = (rotOf(it) * Math.PI / 180) * sign, cx = it.w / 2, cy = it.h / 2, c = Math.cos(a), s = Math.sin(a);
+  const a = (rotOf(it) * Math.PI / 180) * sign, [cx, cy] = rotCenter(it), c = Math.cos(a), s = Math.sin(a);
   return [cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c];
 }
 function rotBox(it, b) {
@@ -526,7 +534,7 @@ export function drawItem(ctx, it, ov, scale, pieces) {
   ctx.strokeStyle = it.color; ctx.fillStyle = it.color;
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   if (pieces && it.type !== 'stroke') { drawPieces(ctx, it, pieces); ctx.restore(); return; }
-  if (rotOf(it)) { ctx.translate(it.w / 2, it.h / 2); ctx.rotate(rotOf(it) * Math.PI / 180); ctx.translate(-it.w / 2, -it.h / 2); }
+  if (rotOf(it)) { const [rcx, rcy] = rotCenter(it); ctx.translate(rcx, rcy); ctx.rotate(rotOf(it) * Math.PI / 180); ctx.translate(-rcx, -rcy); }
   switch (it.type) {
     case 'stroke': {
       if (it.kind === 'hl') { ctx.globalAlpha = 0.38; }

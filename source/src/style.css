@@ -419,3 +419,10 @@ kbd { font: 12px ui-monospace, Consolas, monospace; background: #f3f4f6; border:
 .fig-scroll { overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; margin-right: -4px; padding-right: 4px; }
 .fig-pop .shape-size { padding-top: 8px; margin-top: 4px; }
 .fig-pop .sh-chip { height: 40px; gap: 3px; }
+/* панель над выделенным — крупнее: легче попасть пером и пальцем */
+.selbar { padding: 5px; gap: 2px; border-radius: 14px; }
+.selbar .ibtn.sq { width: 44px; height: 44px; border-radius: 10px; }
+.selbar .ibtn .ic, .selbar .ibtn .ic svg { width: 22px; height: 22px; }
+.selbar .isize .sz-range { width: 130px; }
+.selbar .isize .sz-val { font-size: 14px; }
+.selbar .isep { height: 28px; }
