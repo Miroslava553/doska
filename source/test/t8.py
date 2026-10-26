@@ -33,7 +33,7 @@ with sync_playwright() as p:
     rx, ry = J(pg, f'() => window.__doska.toScreen({f0["x"]} + {f0["w"]}, {f0["y"]} + {f0["h"]} / 2)')
     pg.mouse.move(rx + 5, ry); pg.mouse.down(); pg.mouse.move(rx + 125, ry, steps=4); pg.mouse.up()
     f1 = J(pg, '() => { const d = window.__doska; return {...d.items.get([...d.S.sel][0])}; }')
-    pg.click('.selbar [data-tip^="Правильная форма"]')
+    pg.click('.selbar [data-tip^="Выровнять"]')
     f2 = J(pg, '() => { const d = window.__doska; return {...d.items.get([...d.S.sel][0])}; }')
     print('square w×h:', round(f0['w']), round(f0['h']), '→ stretched', round(f1['w']), round(f1['h']), '→ regular', round(f2['w']), round(f2['h']))
     # прямоугольник и треугольник по Shift+R

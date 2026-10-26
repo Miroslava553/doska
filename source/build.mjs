@@ -9,18 +9,21 @@ fs.copyFileSync('node_modules/pdfjs-dist/build/pdf.worker.min.mjs', 'src/gen/pdf
 // Версия сборки: по ней открытая доска узнаёт, что вышло обновление
 const d = new Date(); const pad = (n) => String(n).padStart(2, '0');
 const VERSION = `${d.getUTCFullYear()}.${pad(d.getUTCMonth() + 1)}.${pad(d.getUTCDate())}-${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}`;
-const res = await esbuild.build({
+const bundle = async (accounts) => (await esbuild.build({
   entryPoints: ['src/main.js'], bundle: true, format: 'iife', minify: true, write: false,
   target: ['chrome100', 'firefox100', 'safari15'], loader: { '.txt': 'text' }, legalComments: 'none',
-  logLevel: 'warning', define: { 'import.meta.url': '""', __VERSION__: JSON.stringify(VERSION) }, supported: { 'top-level-await': false },
-});
-const js = res.outputFiles[0].text;
+  logLevel: 'warning', define: { 'import.meta.url': '""', __VERSION__: JSON.stringify(VERSION), __ACCOUNTS__: String(accounts) }, supported: { 'top-level-await': false },
+})).outputFiles[0].text;
+// Тестовый файл — со входом и подпиской «понарошку». Сайт — без них, пока нет сервера (все возможности открыты).
+const ACC_TEST = process.env.NO_ACCOUNTS ? false : true;
+const jsTest = await bundle(ACC_TEST), jsSite = await bundle(false);
+const js = jsTest;
 const mathjax = fs.readFileSync('node_modules/mathjax/es5/tex-svg-full.js', 'utf8');
-const css = fs.readFileSync('src/style.css', 'utf8');
+const css = fs.readFileSync('src/style.css', 'utf8') + '\n' + fs.readFileSync('src/pro.css', 'utf8');
 const esc = (s) => s.replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
 const mjConfig = `window.MathJax={loader:{load:[]},startup:{typeset:false},options:{enableMenu:false,enableAssistiveMml:false,enableEnrichment:false},svg:{fontCache:'none'},tex:{packages:{'[+]':['ams','physics','mhchem','cancel','color','boldsymbol']}}};`;
 
-const html = `<!doctype html>
+const page = (js) => `<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
@@ -36,10 +39,11 @@ const html = `<!doctype html>
 </body>
 </html>`;
 fs.mkdirSync('dist', { recursive: true });
+const html = page(jsTest);
 fs.writeFileSync('dist/doska.html', html);
 // Сайт для GitHub Pages: та же доска + файл версии
 fs.mkdirSync('dist/site', { recursive: true });
-fs.writeFileSync('dist/site/index.html', html);
+fs.writeFileSync('dist/site/index.html', page(jsSite));
 fs.writeFileSync('dist/site/version.json', JSON.stringify({ v: VERSION, notes: RELEASE }));
 fs.writeFileSync('dist/site/.nojekyll', '');
 console.log('version', VERSION, '| dist/doska.html', (html.length / 1024 / 1024).toFixed(2), 'MB; app js', (js.length / 1024).toFixed(0), 'KB');

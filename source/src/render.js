@@ -221,6 +221,7 @@ export function localBox(it) {
     }
     case 'text': { const m = measureText(it); b = [0, 0, m.w, m.h]; break; }
     case 'tex': { const c = texImage(it.tex, it.color, it.fs); b = [0, 0, c.w || 100, c.h || 40]; break; }
+    case 'hw': { const g = hwGeom(it); const e = g.sz * 0.15; b = [-e, -e, g.pw + (g.label ? g.gap + g.lw : 0) + e, g.sz + e]; break; }
     default: b = [0, 0, it.w || 100, it.h || 100];
   }
   it._lb = b;
@@ -246,6 +247,21 @@ export function geomWorldBox(it) {
 // Текст и формулы при растяжении по одной оси не искажаем — только сдвигаем.
 export const NO_STRETCH = new Set(['text', 'tex']);
 // Учитывает «предпросмотр» перемещения/масштаба (ov) ещё до записи в документ.
+// Шторка закрывает конкретные объекты (cover) и всегда лежит ровно поверх них: двигаешь ответ, шторка едет вместе с ним.
+// get(id) отдаёт объект, ovOf(id) — временный сдвиг, пока объект тащат. Возвращает копию шторки с нужной рамкой.
+export function fitShade(sh, get, ovOf = () => null) {
+  if (!Array.isArray(sh.cover)) return sh;
+  let b = null;
+  for (const id of sh.cover) {
+    const it = get(id); if (!it || it.page !== sh.page) continue;
+    const w = worldBox(it, ovOf(id));
+    b = b ? [Math.min(b[0], w[0]), Math.min(b[1], w[1]), Math.max(b[2], w[2]), Math.max(b[3], w[3])] : w;
+  }
+  const { _lb, ...r } = sh;
+  if (!b) return { ...r, x: sh.x || 0, y: sh.y || 0, s: 1, w: 0, h: 0, _empty: true };
+  const p = sh.pad ?? 10;
+  return { ...r, x: b[0] - p, y: b[1] - p, s: 1, w: b[2] - b[0] + 2 * p, h: b[3] - b[1] + 2 * p, _empty: false };
+}
 export function itemTransform(it, ov) {
   let x = it.x || 0, y = it.y || 0, s = it.s || 1, sx = s, sy = s;
   if (ov && ov.ids && ov.ids.has(it.id)) {
@@ -519,6 +535,20 @@ export function bakeShape(it, kx, ky, ax, ay) {
   return out;
 }
 // ctx уже в мировых координатах. scale — пикселей экрана на единицу мира (для детализации).
+// Метка «Д/З»: размеры от высоты значка sz
+let measureCtx = null;
+export function hwGeom(it) {
+  const sz = it.sz || 48, pw = sz * 0.72, r = pw / 2;
+  const label = ''; // название не рисуем на доске, чтобы метка не закрывала задание; оно видно в списке и в панели метки
+  const fs = sz * 0.3, font = `600 ${fs}px ${FONT}`, lpad = fs * 0.6, lh = fs * 1.7, gap = sz * 0.12;
+  let lw = 0;
+  if (label) { measureCtx ||= document.createElement('canvas').getContext('2d'); measureCtx.font = font; lw = measureCtx.measureText(label).width + lpad * 2; }
+  return { sz, pw, r, label, font, lpad, lh, lw, gap };
+}
+// Скрытый ответ: репетитор видит под шторкой бледно, ученик не видит ничего
+let shadePeek = true;
+export function setShadePeek(v) { shadePeek = !!v; }
+function roundRectPath(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
 export function drawItem(ctx, it, ov, scale, pieces) {
   if (ov && ov.ids && ov.ids.has(it.id) && SCALE_BAKED.has(it.type) && !pieces) {
     const kx = ov.k || ov.kx || 1, ky = ov.k || ov.ky || 1;
@@ -586,6 +616,46 @@ export function drawItem(ctx, it, ov, scale, pieces) {
       const img = getImage(it.src);
       if (img) ctx.drawImage(img, 0, 0, it.w, it.h);
       else { ctx.fillStyle = '#f1f3f5'; ctx.fillRect(0, 0, it.w, it.h); }
+      break;
+    }
+    case 'hw': {
+      // метка «Д/З»: красный значок, как на карте, с лёгким свечением и подписью справа
+      if ((it.op ?? 1) <= 0) break; // прозрачность 0 — метку не видно совсем
+      const g = hwGeom(it), { sz, pw, r } = g;
+      ctx.globalAlpha = it.op ?? 1;
+      ctx.save();
+      ctx.shadowColor = 'rgba(250, 82, 82, 0.55)'; ctx.shadowBlur = Math.max(4, sz * 0.32 * sc);
+      ctx.beginPath(); ctx.moveTo(r, sz);
+      ctx.bezierCurveTo(r - r * 0.25, sz - r * 0.75, 0, r * 1.7, 0, r);
+      ctx.arc(r, r, r, Math.PI, 0);
+      ctx.bezierCurveTo(pw, r * 1.7, r + r * 0.25, sz - r * 0.75, r, sz);
+      ctx.closePath();
+      const gr = ctx.createLinearGradient(0, 0, 0, sz); gr.addColorStop(0, '#ff6b6b'); gr.addColorStop(1, '#e03131');
+      ctx.fillStyle = gr; ctx.fill();
+      ctx.restore();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(r, r, r * 0.42, 0, Math.PI * 2); ctx.fill();
+      if (g.label) {
+        ctx.font = g.font; const lx = pw + g.gap, ly = r - g.lh / 2;
+        ctx.save(); ctx.shadowColor = 'rgba(15, 23, 42, 0.18)'; ctx.shadowBlur = Math.max(2, sz * 0.12 * sc); ctx.shadowOffsetY = 1;
+        roundRectPath(ctx, lx, ly, g.lw, g.lh, g.lh / 2); ctx.fillStyle = '#fff'; ctx.fill(); ctx.restore();
+        ctx.fillStyle = '#c92a2a'; ctx.textBaseline = 'middle'; ctx.fillText(g.label, lx + g.lpad, r + 1);
+      }
+      ctx.globalAlpha = 1;
+      break;
+    }
+    case 'shade': {
+      if (it._empty || !(it.w > 0) || !(it.h > 0)) break;
+      const r = Math.min(14, it.w / 6, it.h / 6);
+      roundRectPath(ctx, 0, 0, it.w, it.h, r);
+      if (it.open) { ctx.setLineDash([6 / sc, 5 / sc]); ctx.strokeStyle = '#a5b4fc'; ctx.lineWidth = 1.5 / sc; ctx.stroke(); ctx.setLineDash([]); break; }
+      ctx.fillStyle = shadePeek ? 'rgba(237, 242, 255, 0.82)' : '#edf2ff'; ctx.fill();
+      ctx.strokeStyle = '#bac8ff'; ctx.lineWidth = 1.5 / sc; ctx.stroke();
+      if (!shadePeek) {
+        // надпись всегда помещается внутри шторки
+        let fs = Math.min(26, Math.min(it.w, it.h) / 5); ctx.font = `600 ${fs}px ${FONT}`;
+        const tw = ctx.measureText('Ответ скрыт').width; if (tw > it.w * 0.84) fs *= (it.w * 0.84) / tw;
+        if (fs >= 10 / sc && it.h > fs * 1.6) { ctx.fillStyle = '#5c7cfa'; ctx.font = `600 ${fs}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('Ответ скрыт', it.w / 2, it.h / 2); ctx.textAlign = 'start'; }
+      }
       break;
     }
     case 'note': {

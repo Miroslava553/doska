@@ -1,0 +1,45 @@
+# Вход, тариф Про, оформление, праздник, главный экран
+from playwright.sync_api import sync_playwright
+OUT = '/tmp/claude-0/-home-claude/12fda196-4809-5a1d-8432-b3a634b3824b/scratchpad/'
+with sync_playwright() as p:
+    b = p.chromium.launch(); ctx = b.new_context(viewport={'width': 1300, 'height': 850}, device_scale_factor=1.5)
+    ctx.add_init_script("""if (!localStorage.getItem('doska:seed')) { localStorage.setItem('doska:seed','1');
+      localStorage.setItem('doska:prefs', JSON.stringify({name:'Мира', role:'tutor', roleFirst: 1, roleAt: 0}));
+      const rec=[]; const names=['Алгебра — Петя','Геометрия — Аня','Физика — Олег','ОГЭ — Маша','Стереометрия — Дима'];
+      names.forEach((t,i)=>{const r=['aaaa','bbbb','cccc','dddd','eeee'][i]+'-bcde-fghj'; rec.push({room:r,t:Date.now()-i*86400000,title:t}); localStorage.setItem('doska:created:'+r, String(i+1));});
+      localStorage.setItem('doska:recent', JSON.stringify(rec)); }""")
+    pg = ctx.new_page(); errs=[]; pg.on('pageerror', lambda e: errs.append(str(e)))
+    pg.goto('file:///home/claude/board/dist/doska.html'); pg.wait_for_timeout(1200)
+    pg.screenshot(path=OUT + 'h1-home.png')
+    pg.click('text=Войти >> nth=0'); pg.wait_for_timeout(400)
+    pg.screenshot(path=OUT + 'h2-login.png')
+    pg.fill('.am-inp', 'mira@example.com'); pg.click('text=Получить код'); pg.wait_for_timeout(400)
+    pg.screenshot(path=OUT + 'h3-code.png')
+    code = pg.inner_text('.am-code').replace(' ', '')
+    pg.locator('.am-digit').first.click(); pg.keyboard.type(code); pg.wait_for_timeout(1200)
+    pg.screenshot(path=OUT + 'h4-ok.png')
+    pg.click('.am-btn.primary'); pg.wait_for_timeout(400)
+    pg.screenshot(path=OUT + 'h5-home-in.png')
+    pg.click('.pro-pill'); pg.wait_for_timeout(500)
+    pg.screenshot(path=OUT + 'h6-pro.png')
+    pg.click('.am-seg-b >> nth=1'); pg.click('summary'); pg.wait_for_timeout(300)
+    pg.screenshot(path=OUT + 'h7-pro-year.png', full_page=True)
+    pg.click('.am-seg-b >> nth=0')
+    pg.click('.pw-price .am-btn.pro'); pg.wait_for_timeout(500)
+    pg.screenshot(path=OUT + 'h8-checkout.png')
+    pg.click('.am-checkout .am-btn.pro'); pg.wait_for_timeout(500)
+    pg.screenshot(path=OUT + 'h9-paying.png')
+    pg.wait_for_timeout(1400)
+    pg.screenshot(path=OUT + 'h10-cel-a.png')
+    pg.wait_for_timeout(1400)
+    pg.screenshot(path=OUT + 'h11-cel-b.png')
+    pg.click('.am-celebrate .am-btn'); pg.wait_for_timeout(500)
+    pg.screenshot(path=OUT + 'h12-home-pro.png')
+    pg.click('.acc-btn'); pg.wait_for_timeout(300)
+    pg.screenshot(path=OUT + 'h13-menu.png')
+    pg.click('text=Подписка и оплата'); pg.wait_for_timeout(400)
+    pg.screenshot(path=OUT + 'h14-manage.png')
+    pg.click('text=Отменить подписку'); pg.wait_for_timeout(400)
+    pg.screenshot(path=OUT + 'h15-cancel.png')
+    pg.keyboard.press('Escape'); pg.wait_for_timeout(300); pg.keyboard.press('Escape'); pg.wait_for_timeout(300)
+    print(errs); b.close()
