@@ -442,7 +442,7 @@ function showStart() {
     el('div', { class: 'home-brand' }, el('span', { class: 'am-mark sm', html: '<svg viewBox="0 0 32 32"><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg>' }), 'Lodl'),
     accountControls());
   // условия, реквизиты и политика: их проверяет платёжный сервис, и они нужны покупателям
-  const legal = el('div', { class: 'legal' }, el('a', { href: 'terms.html', target: '_blank', rel: 'noopener' }, 'Условия и реквизиты'), el('span', {}, '·'), el('a', { href: 'privacy.html', target: '_blank', rel: 'noopener' }, 'Политика конфиденциальности'));
+  const legal = el('div', { class: 'legal' }, el('a', { href: 'terms.html#prices', target: '_blank', rel: 'noopener' }, 'Lodl Про: 199 ₽ в месяц или 1 990 ₽ в год'), el('span', {}, '·'), el('a', { href: 'terms.html', target: '_blank', rel: 'noopener' }, 'Условия и реквизиты'), el('span', {}, '·'), el('a', { href: 'privacy.html', target: '_blank', rel: 'noopener' }, 'Политика конфиденциальности'));
   document.body.append(el('div', { id: 'start', class: 'with-top' }, top, el('div', { class: 'start-col' }, hint, card, legal)));
 }
 
