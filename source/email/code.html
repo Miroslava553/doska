@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
+<title>Код для входа: {{CODE}}</title>
+</head>
+<!--
+  Письмо с кодом для входа. Вёрстка таблицами и стили в атрибутах, чтобы письмо одинаково выглядело в Gmail, Яндекс Почте, Mail.ru и Outlook.
+  Подстановки: {{CODE}} — шесть цифр без пробелов, {{LOGO}} — адрес logo.png на сайте.
+  Тема: «Код для входа в Lodl: {{CODE}}». Отправитель: «Lodl» <no-reply@домен>.
+-->
+<body style="margin:0;padding:0;background:#ffffff;-webkit-text-size-adjust:100%;">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#ffffff;">Код действует 10 минут.&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;&#8199;&#847;</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#ffffff;">
+  <tr>
+    <td align="center" style="padding:40px 24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:440px;font-family:-apple-system,'Segoe UI',Roboto,Arial,sans-serif;color:#15171a;">
+        <tr>
+          <td style="padding:0 0 28px;"><table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="vertical-align:middle;"><img src="{{LOGO}}" width="40" height="40" alt="" style="display:block;border:0;border-radius:11px;"></td><td style="vertical-align:middle;padding-left:12px;font-size:20px;font-weight:700;color:#15171a;">Lodl</td></tr></table></td>
+        </tr>
+        <tr>
+          <td style="font-size:24px;line-height:30px;font-weight:700;padding:0 0 20px;">Код для входа</td>
+        </tr>
+        <tr>
+          <td style="background:#f1f3f9;border-radius:12px;padding:18px 20px;">
+            <span style="font-family:'SF Mono',Menlo,Consolas,'Courier New',monospace;font-size:32px;line-height:36px;font-weight:700;letter-spacing:8px;color:#15171a;">{{CODE}}</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="font-size:15px;line-height:22px;color:#6c727f;padding:16px 0 0;">Код действует 10 минут.</td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>

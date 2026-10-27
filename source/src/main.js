@@ -10,7 +10,7 @@ import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, sol
 import { StrokeBuilder, oneEuro } from './pen.js';
 import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, moveCursor, vertexCursor } from './cursors.js';
 import { ICONS } from './icons.js';
-import { RELEASE } from './changelog.js';
+import { releaseFor } from './changelog.js';
 import { FIGS, figIcon, figPrims } from './figs.js';
 import { ACCOUNTS, account, isPro, openPro, openLogin, requirePro, proTag, accountControls, onAccount, inCloud, ownedBoards, PLAN } from './account.js';
 import { materialsPanel } from './materials.js';
@@ -392,7 +392,7 @@ function showStart() {
   paintRole();
   // Шаблоны уроков: кнопка рядом с «Создать», видна, когда шаблоны есть
   const tplBtn = el('button', { class: 'btn tpl-btn', hidden: true, title: 'Создать доску из шаблона', html: ICONS.copy });
-  const paintTpl = async () => { tplBtn.hidden = !(await listTemplates()).length; };
+  const paintTpl = async () => { tplBtn.hidden = !ACCOUNTS || !(await listTemplates()).length; }; // на сайте без оплаты Про скрыт
   tplBtn.addEventListener('click', async () => {
     document.querySelector('.tpl-menu')?.remove();
     const list = await listTemplates(); if (!list.length) return;
@@ -425,6 +425,7 @@ function showStart() {
     el('button', { class: 'lh-x', title: 'Скрыть', onclick: () => { LS.set('loginHintOff', 1); paintHint(); } }, '×'));
   const paintHint = () => { hint.hidden = !ACCOUNTS || !!account() || LS.get('loginHintOff', 0) || !LS.get('recent', []).length; };
   const card = el('div', { class: 'start-card' },
+    // на сайте без верхней панели название Lodl стоит в заголовке карточки
     el('div', { class: 'start-head' }, el('h1', {}, 'Доска для занятий'), roleSlot),
     nameIn,
     el('div', { class: 'srow' }, titleIn, el('button', { class: 'btn primary', onclick: () => create() }, 'Создать'), tplBtn),
@@ -437,10 +438,12 @@ function showStart() {
   );
   renderList(); paintHint();
   const off = onAccount(() => { if (!card.isConnected) { off(); return; } renderList(); paintHint(); });
-  const top = ACCOUNTS ? el('header', { class: 'home-top' },
-    el('div', { class: 'home-brand' }, el('span', { class: 'am-mark sm', html: '<svg viewBox="0 0 32 32"><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg>' }), 'Доска'),
-    accountControls()) : null;
-  document.body.append(el('div', { id: 'start', class: ACCOUNTS ? 'with-top' : '' }, top, el('div', { class: 'start-col' }, hint, card)));
+  const top = el('header', { class: 'home-top' },
+    el('div', { class: 'home-brand' }, el('span', { class: 'am-mark sm', html: '<svg viewBox="0 0 32 32"><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg>' }), 'Lodl'),
+    accountControls());
+  // условия, реквизиты и политика: их проверяет платёжный сервис, и они нужны покупателям
+  const legal = el('div', { class: 'legal' }, el('a', { href: 'terms.html', target: '_blank', rel: 'noopener' }, 'Условия и реквизиты'), el('span', {}, '·'), el('a', { href: 'privacy.html', target: '_blank', rel: 'noopener' }, 'Политика конфиденциальности'));
+  document.body.append(el('div', { id: 'start', class: 'with-top' }, top, el('div', { class: 'start-col' }, hint, card, legal)));
 }
 
 // ============ доска ============
@@ -2731,7 +2734,7 @@ function startBoard(room) {
     add('trash', 'Удалить', 'Delete', deleteSelection, 'danger');
     add('copy', 'Дублировать', 'Ctrl+D', duplicate);
     if (its.some((i) => mirrorFields(i))) add('mirror', 'Отразить', 'Зеркально слева направо', mirrorSel);
-    if (tutorView() && !its.some((i) => i.type === 'shade')) add('eyeOff', 'Скрыть ответ', 'Закрыть выделенное шторкой', hideAnswer);
+    if (ACCOUNTS && tutorView() && !its.some((i) => i.type === 'shade')) add('eyeOff', 'Скрыть ответ', 'Закрыть выделенное шторкой', hideAnswer);
     add('lock', its.every((i) => i.locked) ? 'Открепить' : 'Закрепить', 'Закреплённое нельзя случайно сдвинуть, выделить рамкой или стереть — Shift+L', toggleLock);
     return A;
   }
@@ -3661,7 +3664,7 @@ function startBoard(room) {
     const t = boardTitle();
     titleBtn.textContent = t || 'Без названия'; titleBtn.classList.toggle('empty', !t);
     titleBtn.title = t ? 'Переименовать доску' : 'Задать название доски';
-    document.title = (t || 'Доска') + ' — доска для занятий';
+    document.title = t ? t + ' · Lodl' : 'Lodl · онлайн-доска для занятий';
     const recent = LS.get('recent', []); const r = recent.find((x) => x.room === room);
     if (r && r.title !== t) { r.title = t; LS.set('recent', recent); }
   }
@@ -3695,7 +3698,7 @@ function startBoard(room) {
       el('div', { class: 'mh' }, 'Фон'), el('div', { class: 'row' }, bgBtn('grid', 'Клетка'), bgBtn('lines', 'Линейка'), bgBtn('dots', 'Точки'), bgBtn('plain', 'Чисто')),
       el('div', { class: 'mh' }, 'Вставить'),
       item('Картинку или PDF…', () => pickFile(toWorld(W / 2 - 200, H / 4)), 'I, Ctrl+V'),
-      item('Из Материалов…', () => mat.open()),
+      ACCOUNTS ? item('Из Материалов…', () => mat.open()) : null,
       el('div', { class: 'mh' }, 'Сохранить'),
       item('Урок в файл (.doska)', exportLesson, 'Ctrl+S'),
       item('Урок из файла — на новый лист…', importLesson, 'Ctrl+O'),
@@ -3703,8 +3706,8 @@ function startBoard(room) {
       item('Все листы в PDF', exportPdf),
       el('div', { class: 'mh' }, 'Лист'),
       item('Повтор урока', lessonReplay),
-      item(el('span', { class: 'mi-l' }, 'История доски', proTag()), () => hist.open()),
-      item(el('span', { class: 'mi-l' }, 'Сохранить как шаблон…', proTag()), saveAsTemplate),
+      ACCOUNTS ? item(el('span', { class: 'mi-l' }, 'История доски', proTag()), () => hist.open()) : null,
+      ACCOUNTS ? item(el('span', { class: 'mi-l' }, 'Сохранить как шаблон…', proTag()), saveAsTemplate) : null,
       item('Показать всё на листе', fitContent, 'Shift+1'),
       item('Удалить этот лист', () => deletePage(S.page)),
       el('div', { class: 'mh' }, 'Панель инструментов'),
@@ -3782,7 +3785,7 @@ function startBoard(room) {
   const matBtn = el('button', { class: 'tbtn', title: 'Материалы. Картинки, PDF и заготовки по папкам', onclick: () => mat.toggle() }, icon('folder'), el('span', { class: 'tlock', html: ICONS.lock }));
   const paintMatBtn = () => matBtn.classList.toggle('pro-locked', ACCOUNTS && !isPro());
   paintMatBtn(); onAccount(paintMatBtn);
-  topRight.append(rolePill, statusBtn, shareBtn, followBtn, matBtn, fsBtn, el('div', { class: 'sep' }), exitBtn);
+  topRight.append(rolePill, statusBtn, shareBtn, followBtn, ACCOUNTS ? matBtn : null, fsBtn, el('div', { class: 'sep' }), exitBtn);
   // Заготовка из Материалов: те же объекты, что были выделены, — по центру точки
   function insertClip(arr, at) {
     if (!arr?.length) return;
@@ -3990,7 +3993,7 @@ function startBoard(room) {
     startReplay({ items: its, bg: yMeta.get('bg') || 'grid', title: pages().find((p) => p.id === S.page)?.name || '' });
   }
   // «Что нового»: окно со списком изменений. Кнопка сбоку видна сутки после выхода версии.
-  function showRelease(rel = RELEASE, pending = false) {
+  function showRelease(rel = releaseFor(ACCOUNTS), pending = false) {
     const body = el('div', { class: 'rel' },
       el('div', { class: 'rel-sub' }, rel.title),
       ...rel.sections.map(([h, list]) => el('div', { class: 'rel-sec' }, el('div', { class: 'rel-h' }, h), el('ul', {}, ...list.map((t) => el('li', {}, t))))),
@@ -4288,7 +4291,7 @@ function startBoard(room) {
       try {
         window.goatcounter.count({ path: '/open', title: 'Открыли доску' });
         window.goatcounter.count({ path: 'role-' + role, title: role === 'tutor' ? 'Репетитор' : role === 'student' ? 'Ученик' : 'Без статуса', event: true });
-        window.goatcounter.count({ path: 'board-' + h, title: 'Доска', event: true });
+        window.goatcounter.count({ path: 'board-' + h, title: 'Lodl', event: true });
       } catch {}
     };
     if (window.goatcounter?.count) { send(); return; }

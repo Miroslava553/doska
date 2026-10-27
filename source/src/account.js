@@ -133,10 +133,10 @@ export function openLogin({ reason = '', then = null } = {}) {
     for (const ev of ['input', 'change']) inp.addEventListener(ev, () => { err.textContent = ''; checkTypo(); });
     shell(
       brandMark('lg'),
-      el('h2', { class: 'am-h' }, 'Вход в Доску'),
+      el('h2', { class: 'am-h' }, 'Вход в Lodl'),
       el('p', { class: 'am-sub' }, reason || 'Ваши доски сохранятся в аккаунте и будут открываться на любом устройстве.'),
       form,
-      el('p', { class: 'am-fine' }, 'Нажимая «Получить код», вы соглашаетесь на обработку адреса почты.'));
+      el('p', { class: 'am-fine' }, 'Нажимая «Получить код», вы соглашаетесь на ', el('a', { href: 'privacy.html', target: '_blank', rel: 'noopener' }, 'обработку адреса почты'), '.'));
     setTimeout(() => inp.focus(), 60);
   };
 
@@ -243,7 +243,7 @@ export function openPro({ feature = '' } = {}) {
     const raising = !pro && Date.now() < raiseAt();
     card.innerHTML = '';
     put(card, xBtn(s.close),
-      el('div', { class: 'pw-top' }, proMark('md'), el('div', {}, el('h2', { class: 'pw-title' }, 'Доска Про'), el('div', { class: 'pw-for' }, 'Подписка для репетиторов'))),
+      el('div', { class: 'pw-top' }, proMark('md'), el('div', {}, el('h2', { class: 'pw-title' }, 'Lodl Про'), el('div', { class: 'pw-for' }, 'Подписка для репетиторов'))),
       raising ? el('div', { class: 'pw-raise' },
         el('div', { class: 'pw-raise-h' }, `С ${day(raiseAt())} Про будет стоить ${rub(PLAN.raise.month)} в месяц`),
         el('div', { class: 'pw-raise-t' }, `Если вы оформите подписку до этой даты, для вас цена останется ${rub(PLAN.price.month)}, пока подписка действует. До повышения осталось ${daysLeft()} ${daysWord(daysLeft())}.`)) : null,
@@ -268,7 +268,8 @@ function termsList(period) {
     el('li', {}, `Подписка стоит ${rub(price)} ${per(period)}${period === 'year' ? ', это цена десяти месяцев' : ''}, деньги списываются в день оформления, а за три дня до продления мы пришлём напоминание на почту.`),
     el('li', {}, 'Цена, по которой вы оформили Про, остаётся за вами, пока подписка действует.'),
     el('li', {}, 'Отменить подписку можно в любой момент в разделе «Подписка и оплата», и Про будет работать до конца оплаченного периода. Доски и материалы после отмены остаются у вас.'),
-    el('li', {}, 'Оплата картой или через СБП. Данные карты обрабатывает платёжный сервис, мы их не храним.'));
+    el('li', {}, 'Оплата картой или через СБП. Данные карты обрабатывает платёжный сервис, мы их не храним.'),
+    el('li', {}, el('a', { href: 'terms.html#offer', target: '_blank', rel: 'noopener' }, 'Полный текст оферты и реквизиты')));
 }
 
 // ---------- оформление ----------
@@ -285,7 +286,7 @@ function openCheckout(period = 'month') {
       el('button', { class: 'am-back-btn', onclick: () => { s.close(); openPro(); } }, ic('left'), 'Назад'),
       el('h2', { class: 'am-h' }, 'Оформление Про'),
       el('div', { class: 'co-sum' },
-        el('div', { class: 'co-row' }, el('span', {}, 'Доска Про, ' + (period === 'month' ? 'на месяц' : 'на 12 месяцев')), el('span', {}, rub(period === 'year' ? PLAN.price.month * 12 : price))),
+        el('div', { class: 'co-row' }, el('span', {}, 'Lodl Про, ' + (period === 'month' ? 'на месяц' : 'на 12 месяцев')), el('span', {}, rub(period === 'year' ? PLAN.price.month * 12 : price))),
         period === 'year' ? el('div', { class: 'co-row' }, el('span', {}, 'Два месяца в подарок'), el('span', { class: 'co-green' }, '−' + rub(PLAN.price.month * 2))) : null,
         el('div', { class: 'co-line' }),
         el('div', { class: 'co-row total' }, el('span', {}, 'К оплате'), el('span', {}, rub(price))),
@@ -295,7 +296,7 @@ function openCheckout(period = 'month') {
         ...[['card', 'card', 'Карта'], ['sbp', 'sbp', 'СБП']].map(([id, icn, t]) => el('button', { class: 'co-m' + (method === id ? ' on' : ''), onclick: () => { method = id; paint(); } }, ic(icn), t, el('span', { class: 'co-radio' })))),
       testNote('Тестовый режим. Данные карты не нужны, деньги не списываются.'),
       pay,
-      el('p', { class: 'am-fine' }, 'Нажимая кнопку, вы соглашаетесь с условиями подписки.'));
+      el('p', { class: 'am-fine' }, 'Нажимая кнопку, вы соглашаетесь с ', el('a', { href: 'terms.html#offer', target: '_blank', rel: 'noopener' }, 'условиями подписки'), ' и автоматическим продлением.'));
   };
   const submit = (btn) => {
     if (btn.disabled) return;
@@ -322,7 +323,7 @@ export function celebrate() {
     el('div', { class: 'cel-badge' }, el('div', { class: 'cel-ring' }), el('div', { class: 'cel-ring r2' }), proMark('xl')),
     el('div', { class: 'cel-kicker' }, 'Добро пожаловать'),
     el('h2', { class: 'cel-h' }, 'Теперь у вас ', el('span', { class: 'cel-pro' }, 'Про')),
-    el('p', { class: 'am-sub' }, 'Спасибо, что поддерживаете Доску.'),
+    el('p', { class: 'am-sub' }, 'Спасибо, что поддерживаете Lodl.'),
     el('ul', { class: 'cel-list' }, items.map(([icn, t], i) => el('li', { style: `--d:${0.55 + i * 0.12}s` }, el('span', { class: 'pw-ic' }, ic(icn)), el('b', {}, t), el('span', { class: 'cel-check' }, ic('check'))))),
     el('button', { class: 'am-btn pro big', onclick: () => s.close() }, 'Начать'),
     p ? el('p', { class: 'am-fine' }, `Следующее списание ${day(p.until)}`) : null);
@@ -385,7 +386,7 @@ export function manageSub() {
     const price = PLAN.price[p.period];
     put(card, 
       el('div', { class: 'sub-card' },
-        el('div', { class: 'sub-top' }, proMark('sm'), el('div', { class: 'sub-plan' }, 'Доска Про'), el('span', { class: 'sub-state' + (p.canceled ? ' off' : '') }, p.canceled ? 'Не продлевается' : 'Активна')),
+        el('div', { class: 'sub-top' }, proMark('sm'), el('div', { class: 'sub-plan' }, 'Lodl Про'), el('span', { class: 'sub-state' + (p.canceled ? ' off' : '') }, p.canceled ? 'Не продлевается' : 'Активна')),
         el('div', { class: 'sub-price' }, `${rub(price)} ${per(p.period)}`),
         el('div', { class: 'sub-meta' }, p.canceled ? `Про работает до ${day(p.until)}. После этого всё созданное останется.` : `Следующее списание ${day(p.until)}.`)),
       el('div', { class: 'sub-rows' },

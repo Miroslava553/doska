@@ -1,7 +1,7 @@
 // Сборка в один самодостаточный HTML-файл: никаких внешних CDN.
 import * as esbuild from 'esbuild';
 import fs from 'node:fs';
-import { RELEASE } from './src/changelog.js';
+import { RELEASE, releaseFor } from './src/changelog.js';
 
 fs.mkdirSync('src/gen', { recursive: true });
 fs.copyFileSync('node_modules/pdfjs-dist/build/pdf.worker.min.mjs', 'src/gen/pdfworker.txt');
@@ -28,7 +28,7 @@ const page = (js) => `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Доска для занятий</title>
+<title>Lodl · онлайн-доска для занятий</title>
 <link rel="icon" href="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#4c6ef5"/><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg>')}">
 <style>${css}</style>
 </head>
@@ -44,6 +44,8 @@ fs.writeFileSync('dist/doska.html', html);
 // Сайт для GitHub Pages: та же доска + файл версии
 fs.mkdirSync('dist/site', { recursive: true });
 fs.writeFileSync('dist/site/index.html', page(jsSite));
-fs.writeFileSync('dist/site/version.json', JSON.stringify({ v: VERSION, notes: RELEASE }));
+fs.writeFileSync('dist/site/version.json', JSON.stringify({ v: VERSION, notes: releaseFor(false) }));
 fs.writeFileSync('dist/site/.nojekyll', '');
+// страницы с условиями, реквизитами и политикой конфиденциальности
+for (const f of ['terms.html', 'privacy.html']) { fs.copyFileSync('src/pages/' + f, 'dist/site/' + f); fs.copyFileSync('src/pages/' + f, 'dist/' + f); }
 console.log('version', VERSION, '| dist/doska.html', (html.length / 1024 / 1024).toFixed(2), 'MB; app js', (js.length / 1024).toFixed(0), 'KB');
