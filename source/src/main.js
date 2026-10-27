@@ -2936,8 +2936,8 @@ function startBoard(room) {
   function setTool(t, opts = {}) {
     if (t === 'image') { pickFile(null); return; }
     if (t === 'hw' && S.tool !== 'hw') hwPrev = S.tool;
-    // ластик при выделенном — стираем выделенное (как Delete), дальше — обычный ластик
-    if (t === 'eraser' && S.tool === 'select' && S.sel.size && !opts.keepSel) { const n = [...S.sel].filter((id) => !items.get(id)?.locked).length; if (n) { S.sel = new Set([...S.sel].filter((id) => !items.get(id)?.locked)); deleteSelection(); toast(n === 1 ? 'Выделенное стёрто' : `Стёрто: ${n}`); } }
+    // ластик только стирает тем, что проводишь по доске; выделенное при выборе ластика не трогаем
+    if (t === 'eraser' && S.sel.size) { S.sel = new Set(); invalidate(); }
     if (S.tool === t && !opts.noToggle && !(t === 'select' && S.autoBack)) { // V при автовыделении — просто остаёмся в выделении
       if (t === 'eraser') { prefs.eraserPrecise = !prefs.eraserPrecise; savePrefs(); }
     }
