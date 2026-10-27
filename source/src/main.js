@@ -1072,19 +1072,27 @@ function startBoard(room) {
   function hiddenByShade(it) {
     if (it.type === 'hw') return (it.op ?? 1) === 0 || (!tutorView() && !!it.lockEdit);
     if (tutorView() || it.type === 'shade') return false;
-    const sh = pageItems(it.page).filter((x) => x.type === 'shade' && !x.open); if (!sh.length) return false;
-    if (sh.some((x) => Array.isArray(x.cover) && x.cover.includes(it.id))) return true;
+    const sh = shadesOf(it.page);
+    if (sh.cov.has(it.id)) return true;
     // шторки, поставленные до этой версии, закрывают то, что лежит под ними
-    const old = sh.filter((x) => !Array.isArray(x.cover) && x.z > it.z); if (!old.length) return false;
+    const old = sh.old.filter((x) => x.z > it.z); if (!old.length) return false;
     const b = worldBox(it);
     return old.some((x) => { const q = worldBox(x); return b[0] >= q[0] - 1 && b[1] >= q[1] - 1 && b[2] <= q[2] + 1 && b[3] <= q[3] + 1; });
   }
-  // что ученик не должен видеть на листе: всё под закрытыми шторками
-  function coveredSet(page = S.page) {
-    const out = new Set();
-    for (const x of pageItems(page)) if (x.type === 'shade' && !x.open && Array.isArray(x.cover)) for (const id of x.cover) out.add(id);
-    return out;
+  // закрытые шторки листа считаем один раз, пока лист не изменился: иначе у ученика на большой доске
+  // каждое движение ластика или мыши перебирало все объекты для каждого объекта и доска зависала
+  const shadeInfo = new WeakMap();
+  function shadesOf(page) {
+    const a = pageItems(page); let r = shadeInfo.get(a);
+    if (!r) {
+      const closed = a.filter((x) => x.type === 'shade' && !x.open), cov = new Set();
+      for (const x of closed) if (Array.isArray(x.cover)) for (const id of x.cover) cov.add(id);
+      r = { cov, old: closed.filter((x) => !Array.isArray(x.cover)) }; shadeInfo.set(a, r);
+    }
+    return r;
   }
+  // что ученик не должен видеть на листе: всё под закрытыми шторками
+  function coveredSet(page = S.page) { return shadesOf(page).cov; }
   // шторка на время перетаскивания едет вместе с ответом
   function liveShade(it, rv = {}) {
     if (!Array.isArray(it.cover)) return it;
@@ -3448,7 +3456,8 @@ function startBoard(room) {
     return p;
   }
 
-  const FIG_IDS = Object.keys(FIGS).map((k) => 'fig:' + k);
+  const FIG_IDS = Object.keys(FIGS).filter((k) => k !== 'axes').map((k) => 'fig:' + k); // оси координат убраны из меню, старые на досках по-прежнему видны
+  if (prefs.last_shapes === 'fig:axes') prefs.last_shapes = 'line';
   const GROUPS = {
     shapes: { tools: ['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin', 'rect', 'ellipse', 'circle', 'poly', ...FIG_IDS], name: 'Фигуры',
       sections: [['Основные', ['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin', 'rect', 'ellipse', 'circle', 'poly']],
@@ -3785,7 +3794,7 @@ function startBoard(room) {
   const matBtn = el('button', { class: 'tbtn', title: 'Материалы. Картинки, PDF и заготовки по папкам', onclick: () => mat.toggle() }, icon('folder'), el('span', { class: 'tlock', html: ICONS.lock }));
   const paintMatBtn = () => matBtn.classList.toggle('pro-locked', ACCOUNTS && !isPro());
   paintMatBtn(); onAccount(paintMatBtn);
-  topRight.append(rolePill, statusBtn, shareBtn, followBtn, ACCOUNTS ? matBtn : null, fsBtn, el('div', { class: 'sep' }), exitBtn);
+  topRight.append(...[rolePill, statusBtn, shareBtn, followBtn, ACCOUNTS ? matBtn : null, fsBtn, el('div', { class: 'sep' }), exitBtn].filter(Boolean));
   // Заготовка из Материалов: те же объекты, что были выделены, — по центру точки
   function insertClip(arr, at) {
     if (!arr?.length) return;
