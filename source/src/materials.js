@@ -1,7 +1,8 @@
 // «Материалы»: картинки, PDF и свои заготовки, разложенные по папкам. Доступны на любой доске.
 // Пока сервера нет, хранятся в этом браузере (IndexedDB). С сервером — в облаке, у Про — 10 ГБ.
 import { ICONS } from './icons.js';
-import { ACCOUNTS, isPro, openPro, PLAN, onAccount } from './account.js';
+import { ACCOUNTS, isPro, openPro, PLAN, onAccount, account } from './account.js';
+import { SERVER, cloudStore } from './cloud.js';
 
 const el = (tag, attrs = {}, ...kids) => {
   const e = document.createElement(tag);
@@ -30,6 +31,14 @@ const tx = async (store, mode, f) => { const d = await db(); return new Promise(
 const getAll = (store) => tx(store, 'readonly', (st) => st.getAll());
 const put = (store, v) => tx(store, 'readwrite', (st) => st.put(v));
 const del = (store, id) => tx(store, 'readwrite', (st) => st.delete(id));
+// На сайте с сервером Материалы лежат в облаке аккаунта: записи отдельно, файлы отдельно
+const cloudOn = () => SERVER && !!account();
+const S = {
+  all: (store) => (cloudOn() ? cloudStore.list(store) : getAll(store)),
+  put: (store, v) => { if (!cloudOn()) return put(store, v); const { blob, ...rec } = v; return cloudStore.put(store, rec); },
+  del: (store, id) => { if (!cloudOn()) return del(store, id); if (store === 'files') cloudStore.delBlob(id); return cloudStore.del(store, id); },
+};
+const cloudMsg = (e) => (e.status === 402 ? 'Сохранять в Материалы можно с подпиской Про' : e.status === 413 ? 'Место в Материалах закончилось' : e.message || 'Не получилось сохранить');
 
 const limitBytes = () => PLAN.proMaterialsGB * 1024 * 1024 * 1024;
 // Материалы — облако Про. Без подписки сохранить ничего нельзя: панель открывается, а сохранение ведёт к окну Про.
@@ -83,9 +92,12 @@ export function materialsPanel(deps) {
   panel.addEventListener('drop', (e) => { e.preventDefault(); e.stopPropagation(); panel.classList.remove('drop'); upload([...(e.dataTransfer?.files || [])]); });
   panel.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
   panel.addEventListener('keydown', (e) => e.stopPropagation());
-  onAccount(() => { if (!panel.hidden) render(); });
+  onAccount(() => { if (SERVER) loaded = false; if (!panel.hidden) (SERVER ? load() : Promise.resolve()).then(render); });
 
-  async function load() { [folders, files] = await Promise.all([getAll('folders'), getAll('files')]); loaded = true; }
+  async function load() {
+    try { [folders, files] = await Promise.all([S.all('folders'), S.all('files')]); loaded = true; }
+    catch (e) { folders = []; files = []; loaded = false; deps.toast(e.message || 'Не получилось загрузить Материалы'); }
+  }
   const used = () => files.reduce((s, f) => s + (f.size || 0), 0);
   const inFolder = (id) => files.filter((f) => f.folder === id).length + folders.filter((f) => f.parent === id).length;
   const pathOf = (id) => { const out = []; let f = folders.find((x) => x.id === id); while (f) { out.unshift(f); f = folders.find((x) => x.id === f.parent); } return out; };
@@ -170,7 +182,7 @@ export function materialsPanel(deps) {
         const tg = target(ev.clientX, ev.clientY);
         ghost.remove(); panel.classList.remove('dragging');
         for (const x of grid.querySelectorAll('.over')) x.classList.remove('over');
-        if (tg.folder) { f.folder = tg.folder.dataset.folder; await put('files', f); render(); deps.toast('Перенесено в папку'); return; }
+        if (tg.folder) { f.folder = tg.folder.dataset.folder; try { await S.put('files', f); } catch (e) { deps.toast(cloudMsg(e)); return; } render(); deps.toast('Перенесено в папку'); return; }
         if (tg.inPanel) return;
         insert(f, deps.toWorld(ev.clientX, ev.clientY));
       };
@@ -192,7 +204,9 @@ export function materialsPanel(deps) {
     try {
       if (f.kind === 'clip') deps.insertClip(f.items, p);
       else {
-        const file = new File([f.blob], f.name + (f.kind === 'pdf' && !/\.pdf$/i.test(f.name) ? '.pdf' : ''), { type: f.blob.type || (f.kind === 'pdf' ? 'application/pdf' : 'image/png') });
+        const blob = f.blob || (cloudOn() ? await cloudStore.getBlob(f.id) : null);
+        if (!blob) throw new Error('нет файла');
+        const file = new File([blob], f.name + (f.kind === 'pdf' && !/\.pdf$/i.test(f.name) ? '.pdf' : ''), { type: f.blob.type || (f.kind === 'pdf' ? 'application/pdf' : 'image/png') });
         await deps.insertFile(file, p); // по центру точки
       }
     } catch (e) { console.error(e); deps.toast('Не получилось вставить'); }
@@ -209,20 +223,20 @@ export function materialsPanel(deps) {
       file ? item('image', 'Вставить на лист', () => insert(file)) : item('folder', 'Открыть', () => { cur = folder.id; render(); }),
       item('text', 'Переименовать', async () => {
         const n = await deps.ask({ title: 'Название', value: obj.name, maxlength: 60 }); if (!n) return;
-        obj.name = n.slice(0, 60); await put(file ? 'files' : 'folders', obj); render();
+        obj.name = n.slice(0, 60); try { await S.put(file ? 'files' : 'folders', obj); } catch (e) { deps.toast(cloudMsg(e)); } render();
       }),
       moveTargets.length ? el('div', { class: 'mh' }, 'Переложить в') : null,
-      ...moveTargets.slice(0, 12).map((d) => el('button', { class: 'mi mat-mi sub', onclick: async () => { close(); if (file) file.folder = d.id; else folder.parent = d.id; await put(file ? 'files' : 'folders', obj); render(); } }, el('span', { class: 'mi-l' }, ic('folder'), d.name))),
+      ...moveTargets.slice(0, 12).map((d) => el('button', { class: 'mi mat-mi sub', onclick: async () => { close(); if (file) file.folder = d.id; else folder.parent = d.id; try { await S.put(file ? 'files' : 'folders', obj); } catch (e) { deps.toast(cloudMsg(e)); } render(); } }, el('span', { class: 'mi-l' }, ic('folder'), d.name))),
       item('trash', 'Удалить', async () => {
         const n = folder ? inFolder(folder.id) : 0;
         const ok = await deps.confirm({ title: folder ? `Удалить папку «${folder.name}»?` : `Удалить «${file.name}»?`, text: folder && n ? 'Вместе с папкой удалится всё, что в ней лежит.' : 'Со всех досок, где он уже вставлен, ничего не пропадёт.', ok: 'Удалить', danger: true, icon: 'trash' });
         if (!ok) return;
-        if (file) { await del('files', file.id); files = files.filter((x) => x !== file); }
+        if (file) { await S.del('files', file.id).catch(() => {}); files = files.filter((x) => x !== file); }
         else {
           const gone = new Set([folder.id]); let grew = true;
           while (grew) { grew = false; for (const d of folders) if (gone.has(d.parent) && !gone.has(d.id)) { gone.add(d.id); grew = true; } }
-          for (const f of files.filter((x) => gone.has(x.folder))) await del('files', f.id);
-          for (const id of gone) await del('folders', id);
+          for (const f of files.filter((x) => gone.has(x.folder))) await S.del('files', f.id).catch(() => {});
+          for (const id of gone) await S.del('folders', id).catch(() => {});
           files = files.filter((x) => !gone.has(x.folder)); folders = folders.filter((x) => !gone.has(x.id));
           if (gone.has(cur)) cur = '';
         }
@@ -241,7 +255,8 @@ export function materialsPanel(deps) {
     const n = await deps.ask({ title: 'Новая папка', placeholder: 'Например: Геометрия, 9 класс', maxlength: 60, ok: 'Создать' });
     if (!n) return;
     const f = { id: uid(), name: n.slice(0, 60), parent: cur, t: Date.now() };
-    await put('folders', f); folders.push(f); render();
+    try { await S.put('folders', f); } catch (e) { deps.toast(cloudMsg(e)); if (e.status === 402) openPro({ feature: 'materials' }); return; }
+    folders.push(f); render();
   }
   async function upload(list) {
     const all = list;
@@ -257,8 +272,10 @@ export function materialsPanel(deps) {
         const pdf = f.type === 'application/pdf' || /\.pdf$/i.test(f.name);
         const meta = pdf ? await thumbOfPdf(f) : await thumbOfImage(f);
         const rec = { id: uid(), folder: cur, name: f.name.replace(/\.[a-z0-9]+$/i, '').slice(0, 60) || 'Без названия', kind: pdf ? 'pdf' : 'image', blob: f, size: f.size, t: Date.now(), ...meta };
-        await put('files', rec); files.push(rec); ok++; render();
-      } catch (e) { console.error(e); deps.toast('Не получилось загрузить ' + f.name); }
+        if (cloudOn()) { busy(`Загружаем ${f.name}…`); await cloudStore.putBlob(rec.id, f); }
+        await S.put('files', rec); files.push(rec); ok++; render();
+      } catch (e) { console.error(e); deps.toast(e.status ? cloudMsg(e) : 'Не получилось загрузить ' + f.name); if (e.status === 402 || e.status === 413) break; }
+      finally { busy(''); }
     }
   }
   async function saveSelection() {
@@ -270,10 +287,15 @@ export function materialsPanel(deps) {
     const json = JSON.stringify(items);
     const rec = { id: uid(), folder: cur, name: n.slice(0, 60), kind: 'clip', items, thumb, size: json.length + thumb.length, t: Date.now() };
     if (used() + rec.size > limitBytes()) { deps.toast('Место в Материалах закончилось'); return; }
-    await put('files', rec); files.push(rec); render(); deps.toast('Сохранено в Материалы');
+    try { await S.put('files', rec); } catch (e) { deps.toast(cloudMsg(e)); return; }
+    files.push(rec); render(); deps.toast('Сохранено в Материалы');
   }
 
-  async function open() { if (!loaded) await load(); panel.hidden = false; render(); deps.onToggle?.(true); }
+  // строка «Загружаем…» внизу панели, пока файл уходит в облако
+  const busyLine = el('div', { class: 'mat-busy', hidden: true });
+  panel.insertBefore(busyLine, foot);
+  function busy(t) { busyLine.hidden = !t; busyLine.textContent = t; }
+  async function open() { panel.hidden = false; if (!loaded) { grid.innerHTML = ''; busy('Загружаем Материалы…'); await load(); busy(''); } render(); deps.onToggle?.(true); }
   function close() { panel.hidden = true; document.querySelector('.mat-menu')?.remove(); deps.onToggle?.(false); }
   return {
     open, close, el: panel,

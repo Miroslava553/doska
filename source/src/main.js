@@ -12,6 +12,7 @@ import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, move
 import { ICONS } from './icons.js';
 import { releaseFor } from './changelog.js';
 import { FIGS, figIcon, figPrims } from './figs.js';
+import { SERVER, syncRecent, pushBoard, dropBoard, putBoardFolder, dropBoardFolder, boardSync } from './cloud.js';
 import { ACCOUNTS, account, isPro, openPro, openLogin, requirePro, proTag, accountControls, onAccount, inCloud, ownedBoards, PLAN } from './account.js';
 import { materialsPanel } from './materials.js';
 import { startReplay } from './replay.js';
@@ -267,7 +268,35 @@ function feedbackDialog() {
   document.body.append(m);
 }
 const room = roomFromHash();
-if (!room) showStart(); else startBoard(room);
+// Переезд со старого адреса: старая страница передала доски и настройки этого браузера по одноразовой метке
+async function importMoved(token) {
+  const data = await fetch('/api/import/' + token).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (!data) return;
+  const dec = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+  for (const [k, v] of Object.entries(data.ls || {})) {
+    if (!k.startsWith('doska:') || k === 'doska:moved' || k === 'doska:account' || typeof v !== 'string') continue;
+    try {
+      if (k === 'doska:recent') { // списки досок объединяем, ничего не теряя
+        const mine = JSON.parse(localStorage.getItem(k) || '[]'), old = JSON.parse(v), seen = new Set(mine.map((r) => r.room));
+        localStorage.setItem(k, JSON.stringify([...mine, ...old.filter((r) => r && r.room && !seen.has(r.room))].sort((a, b) => b.t - a.t)));
+      } else if (localStorage.getItem(k) == null) localStorage.setItem(k, v);
+    } catch {}
+  }
+  for (const [rm, ups] of Object.entries(data.rooms || {})) {
+    if (!/^[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}$/.test(rm) || !Array.isArray(ups)) continue;
+    try {
+      const d = new Y.Doc(), p = new IndexeddbPersistence('doska-' + rm, d);
+      await p.whenSynced;
+      d.transact(() => { for (const u of ups) { try { Y.applyUpdate(d, dec(u)); } catch {} } });
+      await new Promise((r) => setTimeout(r, 400)); await p.destroy(); d.destroy();
+    } catch (e) { console.warn('import', rm, e); }
+  }
+}
+const importTok = SERVER && new URLSearchParams(location.search).get('import');
+if (importTok && /^[A-Za-z0-9_-]{20,40}$/.test(importTok)) {
+  document.body.append(el('div', { class: 'boot-msg' }, 'Переносим ваши доски…'));
+  importMoved(importTok).finally(() => location.replace(location.pathname + location.hash));
+} else if (!room) showStart(); else startBoard(room);
 
 function showStart() {
   const nameIn = el('input', { class: 'inp', placeholder: 'Ваше имя', value: prefs.name, maxlength: 30, autocomplete: 'off', spellcheck: 'false', title: 'Отображается у собеседника рядом с вашим курсором' });
@@ -304,13 +333,14 @@ function showStart() {
     const n = await uiDialog({ title: 'Новая папка', input: true, placeholder: 'Например: Петя, 9 класс', maxlength: 30, ok: 'Создать' });
     if (!n) return;
     const f = { id: uid(), name: n.slice(0, 30) }; LS.set('bfolders', [...bfolders(), f]); curFolder = f.id; LS.set('bfolderCur', curFolder); renderList();
+    if (SERVER && account()) putBoardFolder(f);
   }
   function moveMenu(r, anchor) {
     document.querySelector('.bf-menu')?.remove();
     const close = () => { m.remove(); document.removeEventListener('pointerdown', out, true); };
     const out = (e) => { if (!m.contains(e.target) && e.target !== anchor) close(); };
     const map = folderOf(); const curF = map[r.room] || '';
-    const set = (id) => { const mm = folderOf(); if (id) mm[r.room] = id; else delete mm[r.room]; LS.set('bfolderOf', mm); close(); renderList(); };
+    const set = (id) => { const mm = folderOf(); if (id) mm[r.room] = id; else delete mm[r.room]; LS.set('bfolderOf', mm); close(); renderList(); if (SERVER && account()) pushBoard(r, id).catch(() => {}); };
     const m = el('div', { class: 'pop panel bf-menu' }, el('div', { class: 'mh' }, 'Переложить в папку'),
       ...bfolders().map((f) => el('button', { class: 'mi' + (curF === f.id ? ' on' : ''), onclick: () => set(f.id) }, el('span', { class: 'mi-l' }, el('span', { class: 'ic', html: ICONS.folder }), f.name))),
       curF ? el('button', { class: 'mi', onclick: () => set('') }, el('span', { class: 'mi-l' }, el('span', { class: 'ic', html: ICONS.boards }), 'Без папки')) : null,
@@ -326,11 +356,13 @@ function showStart() {
     const close = () => { m.remove(); document.removeEventListener('pointerdown', out, true); };
     const out = (e) => { if (!m.contains(e.target)) close(); };
     const m = el('div', { class: 'pop panel bf-menu' },
-      el('button', { class: 'mi', onclick: async () => { close(); const n = await uiDialog({ title: 'Название папки', input: true, value: f.name, maxlength: 30, ok: 'Сохранить' }); if (n) { LS.set('bfolders', bfolders().map((x) => x.id === f.id ? { ...x, name: n.slice(0, 30) } : x)); renderList(); } } }, el('span', { class: 'mi-l' }, el('span', { class: 'ic', html: ICONS.text }), 'Переименовать')),
+      el('button', { class: 'mi', onclick: async () => { close(); const n = await uiDialog({ title: 'Название папки', input: true, value: f.name, maxlength: 30, ok: 'Сохранить' }); if (n) { LS.set('bfolders', bfolders().map((x) => x.id === f.id ? { ...x, name: n.slice(0, 30) } : x)); renderList(); if (SERVER && account()) putBoardFolder({ ...f, name: n.slice(0, 30) }); } } }, el('span', { class: 'mi-l' }, el('span', { class: 'ic', html: ICONS.text }), 'Переименовать')),
       el('button', { class: 'mi danger', onclick: async () => {
         close();
         if (!await uiDialog({ title: `Удалить папку «${f.name}»?`, text: 'Доски не удалятся — они просто будут без папки.', ok: 'Удалить', danger: true, icon: 'trash' })) return;
+        const moved = Object.keys(folderOf()).filter((k) => folderOf()[k] === f.id);
         LS.set('bfolders', bfolders().filter((x) => x.id !== f.id)); const mm = folderOf(); for (const k of Object.keys(mm)) if (mm[k] === f.id) delete mm[k]; LS.set('bfolderOf', mm); renderList();
+        if (SERVER && account()) { dropBoardFolder(f.id); for (const room of moved) { const r = LS.get('recent', []).find((x) => x.room === room); if (r) pushBoard(r, '').catch(() => {}); } }
       } }, el('span', { class: 'mi-l' }, el('span', { class: 'ic', html: ICONS.trash }), 'Удалить папку')));
     document.body.append(m);
     const ar = anchor.getBoundingClientRect(); m.style.left = Math.round(Math.min(ar.left, innerWidth - m.offsetWidth - 8)) + 'px'; m.style.top = Math.round(ar.bottom + 6) + 'px';
@@ -380,6 +412,7 @@ function showStart() {
             forgetHistory(r.room);
             for (const k of ['views:', 'lastPage:', 'unsaved:', 'hwDone:']) localStorage.removeItem('doska:' + k + r.room);
             LS.set('recent', LS.get('recent', []).filter((x) => x.room !== r.room)); hiddenRooms.delete(r.room); renderList();
+            if (SERVER && account()) dropBoard(r.room);
           }, () => { hiddenRooms.delete(r.room); renderList(); });
         } }, '×')));
     }
@@ -437,7 +470,11 @@ function showStart() {
     listBox,
   );
   renderList(); paintHint();
-  const off = onAccount(() => { if (!card.isConnected) { off(); return; } renderList(); paintHint(); });
+  // после входа список досок объединяется со списком в аккаунте
+  const cloudList = () => { if (SERVER && account()) syncRecent(LS).then((ch) => { if (ch && card.isConnected) renderList(); }).catch(() => {}); };
+  cloudList();
+  let wasIn = !!account();
+  const off = onAccount(() => { if (!card.isConnected) { off(); return; } renderList(); paintHint(); if (!!account() !== wasIn) { wasIn = !!account(); cloudList(); paintTpl(); } });
   const top = el('header', { class: 'home-top' },
     el('div', { class: 'home-brand' }, el('span', { class: 'am-mark sm', html: '<svg viewBox="0 0 32 32"><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg>' }), 'Lodl'),
     accountControls());
@@ -452,7 +489,8 @@ function startBoard(room) {
   const old = prev.find((r) => r.room === room);
   const recent = prev.filter((r) => r.room !== room);
   recent.unshift({ room, t: Date.now(), title: old?.title || LS.get('pendingTitle:' + room, '') || '' });
-  LS.set('recent', recent.slice(0, 20));
+  LS.set('recent', recent.slice(0, SERVER ? 200 : 20));
+  if (SERVER && account()) pushBoard(recent[0], LS.get('bfolderOf', {})[room]).catch(() => {});
   navigator.storage?.persist?.();
 
   const doc = new Y.Doc();
@@ -974,7 +1012,7 @@ function startBoard(room) {
   function setPage(id, silent) {
     if (!id || !yPages.has(id) || yPages.get(id).get('deletedAt')) return;
     closeEditors(true);
-    if (S.page) viewByPage[S.page] = { ...S.view };
+    if (S.page && S.pageShown) viewByPage[S.page] = { ...S.view }; // лист ещё не показывали (ждали листов собеседника) — его вид не запоминаем
     S.page = id; S.pageShown = true; S.sel.clear();
     S.view = viewByPage[id] ? { ...viewByPage[id] } : { x: W / 2, y: H / 3, z: 1 };
     LS.set('lastPage:' + room, id);
@@ -3696,7 +3734,7 @@ function startBoard(room) {
     titleBtn.title = t ? 'Переименовать доску' : 'Задать название доски';
     document.title = t ? t + ' · Lodl' : 'Lodl · онлайн-доска для занятий';
     const recent = LS.get('recent', []); const r = recent.find((x) => x.room === room);
-    if (r && r.title !== t) { r.title = t; LS.set('recent', recent); }
+    if (r && r.title !== t) { r.title = t; LS.set('recent', recent); if (SERVER && account()) pushBoard(r, LS.get('bfolderOf', {})[room]).catch(() => {}); }
   }
   function editTitle() {
     titleTip.hidden = true;
@@ -4014,7 +4052,8 @@ function startBoard(room) {
       if (!name) return;
       const first = st.pages.slice().sort((a, b) => a.order - b.order)[0];
       const its = st.items.filter((it) => it.page === first?.id);
-      await saveTemplate(name.slice(0, 40), st, its.length ? clipThumb(its) : '');
+      try { await saveTemplate(name.slice(0, 40), st, its.length ? clipThumb(its) : ''); }
+      catch (e) { toast(e.status === 413 ? 'Шаблон слишком большой или место в облаке закончилось' : e.status === 402 ? 'Сохранять шаблоны можно с подпиской Про' : e.message || 'Не получилось сохранить шаблон', 4000); return; }
       toast('Шаблон сохранён', 3000);
     });
   }
@@ -4374,6 +4413,10 @@ function startBoard(room) {
       }, NOUNDO);
     } catch (e) { console.warn('template', e); }
   }
-  idb.whenSynced.then(async () => { await applyTemplate(); tplLoading = false; start(); });
+  // доска в аккаунте: то, что рисовали на других устройствах, подтягивается, своё уходит на сервер
+  let cloud = null;
+  const cloudOn = () => { if (SERVER && account() && !cloud) cloud = boardSync(room, doc, { skip: [idb] }); };
+  onAccount(() => { if (account()) cloudOn(); else if (cloud) { cloud.stop(); cloud = null; } });
+  idb.whenSynced.then(async () => { await applyTemplate(); tplLoading = false; start(); cloudOn(); });
   setTimeout(() => { if (!tplLoading) start(); }, 3000); // если IndexedDB недоступна — всё равно запускаемся
 }

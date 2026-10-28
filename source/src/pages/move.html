@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lodl переехал</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%234c6ef5'/%3E%3Cpath d='M8 22l3-1 11-11-2-2-11 11z' fill='%23fff'/%3E%3C/svg%3E">
+<style>
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f7fb; font: 16px/1.5 -apple-system, 'Segoe UI', Roboto, Arial, sans-serif; color: #15171a; }
+  .card { background: #fff; border-radius: 18px; box-shadow: 0 10px 40px rgba(20, 30, 60, .08); padding: 32px 28px; max-width: 420px; margin: 16px; text-align: center; }
+  h1 { font-size: 22px; margin: 14px 0 8px; } p { color: #5d6370; margin: 0 0 18px; }
+  .mark { width: 48px; height: 48px; margin: 0 auto; border-radius: 13px; background: #4c6ef5; display: grid; place-items: center; }
+  .spin { width: 28px; height: 28px; border-radius: 50%; border: 3px solid #e3e7f5; border-top-color: #4c6ef5; animation: s .8s linear infinite; margin: 6px auto 0; }
+  @keyframes s { to { transform: rotate(360deg); } }
+  a.btn { display: inline-block; background: #4c6ef5; color: #fff; text-decoration: none; font-weight: 700; padding: 12px 20px; border-radius: 10px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="mark"><svg width="30" height="30" viewBox="0 0 32 32"><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg></div>
+  <h1>Lodl переехал на %HOST%</h1>
+  <p id="t">Переносим ваши доски. Это займёт несколько секунд.</p>
+  <div id="s" class="spin"></div>
+  <a id="go" class="btn" hidden>Открыть Lodl</a>
+</div>
+<script>
+// Старый адрес: забираем доски и настройки из этого браузера, отправляем на новый сервер и открываем новый адрес.
+(function () {
+  var TARGET = '%TARGET%';
+  var hash = location.hash || '';
+  var go = document.getElementById('go'), t = document.getElementById('t'), s = document.getElementById('s');
+  function open(url) { location.replace(url); go.href = url; }
+  function fail() { s.hidden = true; t.textContent = 'Не получилось перенести доски автоматически. Нажмите кнопку, а если досок на новом адресе не будет, откройте эту страницу ещё раз.'; go.hidden = false; go.href = TARGET + '/' + hash; }
+  if (localStorage.getItem('doska:moved')) { open(TARGET + '/' + hash); return; }
+  function b64(u8) { var s = ''; for (var i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+  function readDb(name) {
+    return new Promise(function (res) {
+      var r = indexedDB.open(name);
+      r.onerror = function () { res(null); };
+      r.onupgradeneeded = function () { r.transaction.abort(); res(null); }; // такой базы не было
+      r.onsuccess = function () {
+        var db = r.result;
+        if (!db.objectStoreNames.contains('updates')) { db.close(); res(null); return; }
+        var out = [], st = db.transaction('updates', 'readonly').objectStore('updates').openCursor();
+        st.onsuccess = function () { var c = st.result; if (c) { out.push(b64(new Uint8Array(c.value))); c.continue(); } else { db.close(); res(out); } };
+        st.onerror = function () { db.close(); res(null); };
+      };
+    });
+  }
+  var ls = {}; for (var i = 0; i < localStorage.length; i++) { var k = localStorage.key(i); if (k && k.indexOf('doska:') === 0) ls[k] = localStorage.getItem(k); }
+  var rooms = {};
+  try { JSON.parse(ls['doska:recent'] || '[]').forEach(function (r) { if (r && r.room) rooms[r.room] = 1; }); } catch (e) {}
+  var m = /r=([a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4})/.exec(hash); if (m) rooms[m[1]] = 1;
+  var list = indexedDB.databases ? indexedDB.databases().then(function (d) { d.forEach(function (x) { var mm = /^doska-([a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4})$/.exec(x.name || ''); if (mm) rooms[mm[1]] = 1; }); }).catch(function () {}) : Promise.resolve();
+  list.then(function () {
+    var names = Object.keys(rooms), data = { ls: ls, rooms: {} };
+    return names.reduce(function (p, room) { return p.then(function () { return readDb('doska-' + room).then(function (u) { if (u && u.length) data.rooms[room] = u; }); }); }, Promise.resolve()).then(function () { return data; });
+  }).then(function (data) {
+    if (!Object.keys(data.rooms).length && !Object.keys(data.ls).length) { open(TARGET + '/' + hash); return; }
+    return fetch(TARGET + '/api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(function (j) { try { localStorage.setItem('doska:moved', '1'); } catch (e) {} open(TARGET + '/?import=' + j.token + hash); });
+  }).catch(fail);
+  setTimeout(function () { if (go.hidden) fail(); }, 45000);
+})();
+</script>
+</body>
+</html>

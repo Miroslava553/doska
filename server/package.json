@@ -1,0 +1,9 @@
+{
+  "name": "lodl-server",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Сервер Lodl: вход, подписка Про, облако",
+  "main": "index.js",
+  "engines": { "node": ">=22.13" },
+  "dependencies": { "nodemailer": "^6.9.16", "yjs": "^13.6.33" }
+}

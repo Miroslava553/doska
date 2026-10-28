@@ -574,3 +574,6 @@ body[data-bar="bottom"] .hwbox { bottom: calc(var(--bar-bottom, 12px) + 70px); }
 .brand-h span { font-size: 13px; color: #868e96; margin-top: -2px; }
 .pro-pill .pp-short { display: none; }
 @media (max-width: 520px) { .pro-pill .pp-long { display: none; } .pro-pill .pp-short { display: inline; } }
+.am-spin.big { width: 40px; height: 40px; border-width: 3.5px; border-color: rgba(76, 110, 245, .2); border-top-color: var(--pro); margin: 6px auto 14px; }
+.co-how { font-size: 13.5px; line-height: 1.45; color: var(--muted, #6c727f); margin: 14px 0 12px; }
+.mat-busy { font-size: 12.5px; color: var(--muted, #6c727f); padding: 6px 14px 0; }

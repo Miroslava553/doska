@@ -1,3 +1,5 @@
 node_modules/
 source/dist/
 source/src/gen/
+server/node_modules/
+server/data/
