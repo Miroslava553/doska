@@ -572,3 +572,5 @@ body[data-bar="bottom"] .hwbox { bottom: calc(var(--bar-bottom, 12px) + 70px); }
 .brand-h { display: flex; flex-direction: column; gap: 0; }
 .brand-h h1 { margin: 0 !important; }
 .brand-h span { font-size: 13px; color: #868e96; margin-top: -2px; }
+.pro-pill .pp-short { display: none; }
+@media (max-width: 520px) { .pro-pill .pp-long { display: none; } .pro-pill .pp-short { display: inline; } }

@@ -239,7 +239,7 @@ export function openPro({ feature = '' } = {}) {
       else { s.close(); openCheckout(period); }
     };
     const cta = pro
-      ? el('button', { class: 'am-btn pro big', onclick: () => { s.close(); manageSub(); } }, 'Управление подпиской')
+      ? el('button', { class: 'am-btn pro big', onclick: () => { s.close(); manageSub(); } }, 'Подписка и оплата')
       : el('button', { class: 'am-btn pro big', onclick: buy }, `${p ? 'Возобновить' : 'Оформить'} Про за ${rub(price)}`);
     const order = feature && FEATURES[feature] ? [feature, ...Object.keys(FEATURES).filter((k) => k !== feature)] : Object.keys(FEATURES);
     const raising = !pro && Date.now() < raiseAt();
@@ -269,7 +269,7 @@ function termsList(period) {
   return el('ul', { class: 'am-terms-list' },
     el('li', {}, `Подписка стоит ${rub(price)} ${per(period)}${period === 'year' ? ', это цена десяти месяцев' : ''}, деньги списываются в день оформления, а за три дня до продления мы пришлём напоминание на почту.`),
     el('li', {}, 'Цена, по которой вы оформили Про, остаётся за вами, пока подписка действует.'),
-    el('li', {}, 'Отменить подписку можно в любой момент в разделе «Подписка и оплата», и Про будет работать до конца оплаченного периода. Доски и материалы после отмены остаются у вас.'),
+    el('li', {}, 'Отменить подписку можно в любой момент в разделе «Подписка и оплата». После оформления он открывается кнопкой справа вверху на главной странице. Про будет работать до конца оплаченного периода, а доски и материалы останутся у вас.'),
     el('li', {}, 'Оплата картой или через СБП. Данные карты обрабатывает платёжный сервис, мы их не храним.'),
     el('li', {}, el('a', { href: 'terms.html#offer', target: '_blank', rel: 'noopener' }, 'Полный текст оферты и реквизиты')));
 }
@@ -399,7 +399,7 @@ export function manageSub() {
   const paint = () => {
     const p = proInfo(), pro = isPro();
     card.innerHTML = '';
-    put(card, xBtn(s.close), el('h2', { class: 'am-h left' }, 'Подписка'));
+    put(card, xBtn(s.close), el('h2', { class: 'am-h left' }, 'Подписка и оплата'));
     if (!pro) {
       put(card, el('div', { class: 'sub-card free' }, el('div', { class: 'sub-plan' }, 'Базовый'), el('div', { class: 'sub-meta' }, 'Бесплатно, навсегда')),
         el('button', { class: 'am-btn pro', onclick: () => { s.close(); openPro(); } }, 'Перейти на Про'));
@@ -414,13 +414,13 @@ export function manageSub() {
       el('div', { class: 'sub-rows' },
         el('div', { class: 'sub-row' }, el('span', {}, 'Аккаунт'), el('span', {}, account().email)),
         el('div', { class: 'sub-row' }, el('span', {}, 'Способ оплаты'), el('span', {}, (p.method === 'sbp' ? 'СБП' : 'Карта') + (TEST ? ' · тест' : ''))),
-        el('div', { class: 'sub-row' }, el('span', {}, 'Цена'), el('span', {}, 'Закреплена навсегда'))),
+        el('div', { class: 'sub-row' }, el('span', {}, 'Цена'), el('span', {}, 'Не меняется, пока подписка действует'))),
       p.canceled
         ? el('button', { class: 'am-btn pro', onclick: () => { const a = account(); a.pro.canceled = false; saveAccount(a); paint(); } }, 'Возобновить подписку')
         : p.period === 'month'
           ? el('button', { class: 'am-btn ghost', onclick: () => { const a = account(); a.pro.period = 'year'; saveAccount(a); paint(); } }, `Перейти на год за ${rub(PLAN.price.year)}, два месяца в подарок`)
           : null,
-      p.canceled ? null : el('button', { class: 'am-link danger', onclick: () => confirmCancel(paint) }, 'Отменить подписку'));
+      p.canceled ? null : el('button', { class: 'am-btn ghost danger-t', onclick: () => confirmCancel(paint) }, 'Отменить подписку'));
   };
   paint();
   return s;
@@ -454,7 +454,7 @@ export function accountControls() {
     wrap.innerHTML = '';
     const a = account();
     wrap.append(isPro()
-      ? el('button', { class: 'pro-pill on', title: 'Подписка', onclick: () => manageSub() }, ic('sparkle'), 'Про')
+      ? el('button', { class: 'pro-pill on', onclick: () => manageSub() }, ic('sparkle'), el('span', { class: 'pp-long' }, 'Подписка и оплата'), el('span', { class: 'pp-short' }, 'Подписка'))
       : el('button', { class: 'pro-pill', onclick: () => openPro() }, ic('sparkle'), 'Про'));
     if (!a) wrap.append(el('button', { class: 'acc-login', onclick: () => openLogin() }, 'Войти'));
     else { const b = el('button', { class: 'acc-btn', title: a.email, onclick: () => accountMenu(b) }, avatar(a)); wrap.append(b); }
