@@ -2022,7 +2022,7 @@ function startBoard(room) {
     const wc = toWorld(hit.c ? hit.c[0] : 0, hit.c ? hit.c[1] : 0);
     const ang = (p) => Math.atan2(p[1] - wc[1], p[0] - wc[0]) * 180 / Math.PI;
     const rot0 = it.rot || 0;
-    let tmp = clean, moved = false, shown = 0, last = pt;
+    let tmp = clean, moved = false, shown = 0, last = pt, lock = false, lockLine = null;
     S.hidden = new Set([it.id]); invalidate();
     const inShape = S.shapeEdit === it.id;
     cvOver.style.cursor = hit.mode === 'vertex' ? 'none' : hit.mode === 'edge' ? moveCursor() : rotateCursor(hit.k);
@@ -2046,9 +2046,18 @@ function startBoard(room) {
         moved = true; last = p;
         if (hit.mode === 'vertex') {
           const W = V0.map((q) => q.slice()); let nx = V0[hit.i][0] + p[0] - pt[0], ny = V0[hit.i][1] + p[1] - pt[1];
-          if (k === 'line' && ev && ev.shiftKey) { // Shift — направление шагом 15°
-            const o = V0[1 - hit.i], L = Math.hypot(nx - o[0], ny - o[1]), a = Math.round(Math.atan2(ny - o[1], nx - o[0]) / (Math.PI / 12)) * (Math.PI / 12);
-            nx = o[0] + L * Math.cos(a); ny = o[1] + L * Math.sin(a);
+          lock = false;
+          if (k === 'line') {
+            // конец ведут вдоль самой линии — он прилипает к её направлению, наклон не меняется (линию удобно удлинить или укоротить)
+            const o = V0[1 - hit.i], ux = V0[hit.i][0] - o[0], uy = V0[hit.i][1] - o[1], u = Math.hypot(ux, uy) || 1;
+            const ex = ux / u, ey = uy / u, along = (nx - o[0]) * ex + (ny - o[1]) * ey, off = Math.abs((nx - o[0]) * ey - (ny - o[1]) * ex);
+            const a0 = Math.atan2(uy, ux), L = Math.hypot(nx - o[0], ny - o[1]), a = Math.atan2(ny - o[1], nx - o[0]);
+            let dA = Math.abs(a - a0) % Math.PI; dA = Math.min(dA, Math.PI - dA);
+            if (ev && ev.shiftKey) { // Shift — своё направление, если тянут примерно по нему, иначе шаг 15°
+              if (dA < Math.PI / 18) lock = true;
+              else { const q = Math.round(a / (Math.PI / 12)) * (Math.PI / 12); nx = o[0] + L * Math.cos(q); ny = o[1] + L * Math.sin(q); }
+            } else if (off * S.view.z < 7 && Math.abs(along) * S.view.z > 10) lock = true;
+            if (lock) { nx = o[0] + along * ex; ny = o[1] + along * ey; lockLine = [o, ex, ey]; }
           }
           W[hit.i] = [nx, ny]; tmp = fromWorld(W);
         } else if (hit.mode === 'edge') { // сторона едет целиком, остальное на месте; Shift — только по горизонтали или вертикали
@@ -2065,7 +2074,14 @@ function startBoard(room) {
       drawOver(c) { drawItem(c, tmp, null, S.view.z); },
       drawScreen(c) {
         if (inShape) drawShapeOverlay(c, tmp, k, hit);
-        else if (hit.mode === 'vertex') { const v = editVerts(tmp, k)[hit.i] || null; if (v) vertexDot(c, ...toScreen(v.w[0], v.w[1])); }
+        else if (hit.mode === 'vertex') {
+          const v = editVerts(tmp, k)[hit.i] || null;
+          if (v && lock && lockLine) { // пунктир продолжает линию: видно, что конец идёт строго по ней
+            const [o, ex, ey] = lockLine, R = 4000 / S.view.z, A = toScreen(o[0] - ex * R, o[1] - ey * R), B = toScreen(o[0] + ex * R, o[1] + ey * R);
+            c.save(); c.strokeStyle = 'rgba(76,110,245,.55)'; c.lineWidth = 1; c.setLineDash([5, 5]); c.beginPath(); c.moveTo(A[0], A[1]); c.lineTo(B[0], B[1]); c.stroke(); c.restore();
+          }
+          if (v) vertexDot(c, ...toScreen(v.w[0], v.w[1]));
+        }
       },
       end() {
         S.hidden = new Set(); updateCursor();
@@ -3427,6 +3443,9 @@ function startBoard(room) {
     // место окна считаем от его настоящего размера; если содержимое потом поменяло высоту — p.place() ставит заново,
     // чтобы окно всегда прилегало к своей кнопке (при нижней панели — нижним краем к панели)
     p.place = () => {
+      // панель инструментов могла перерисоваться (выбор инструмента), тогда берём новую кнопку той же группы
+      if (!anchor.isConnected && p.dataset.grp) anchor = toolbar.querySelector(`[data-grp="${p.dataset.grp}"]`) || anchor;
+      if (!anchor.isConnected) return;
       const r = anchor.getBoundingClientRect(); const pr = p.getBoundingClientRect();
       const side = toolbar.contains(anchor) ? (prefs.barPos || 'top') : 'top';
       // окна у панели инструментов — по центру своей кнопки (у края экрана сдвигаются, чтобы не обрезаться)
@@ -3548,6 +3567,8 @@ function startBoard(room) {
         btn.onclick = () => {
           clearTimeout(hoverTimer); btn.classList.remove('hovering');
           if (gname === 'shapes' && !active) setTool(last);
+          // выбор инструмента перерисовал панель: окно открываем у новой кнопки, иначе оно улетает в угол
+          if (!btn.isConnected) { const nb = toolbar.querySelector(`[data-grp="${gname}"]`); if (nb && !popOpen(gname)) nb.click(); return; }
           if (!popOpen(gname)) openGroup();
         };
         const openGroup = () => {
@@ -4261,6 +4282,7 @@ function startBoard(room) {
       ['Удалить выделенное', 'Delete'],
       ['Удалить текущий лист (если ничего не выделено)', 'Delete'],
       ['Копия перетаскиванием', 'Alt + тянуть'],
+      ['Удлинить линию или вектор, не меняя наклон', 'тянуть конец вдоль линии'],
       ['Правильная форма (квадрат, окружность, равносторонний…)', 'Shift+R'],
       ['Копировать / вставить / дублировать', 'Ctrl+C / Ctrl+V / Ctrl+D'],
       ['Выделить всё на листе', 'Ctrl+A'],

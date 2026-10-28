@@ -6,6 +6,8 @@ import { ICONS } from './icons.js';
 
 export const ACCOUNTS = typeof __ACCOUNTS__ !== 'undefined' ? __ACCOUNTS__ : false;
 const TEST = ACCOUNTS; // сервера ещё нет: письма не отправляются, деньги не списываются
+// Сайт до подключения ЮKassa: кнопка Про, описание, цены и оформление видны, но оплата ещё не принимается
+export const SHOP = !ACCOUNTS;
 
 // Условия. Цена, по которой человек оформил Про, остаётся за ним, пока подписка действует.
 // raise: когда и до скольких поднимется цена для новых подписчиков. Дату и цену обязательно выполнить.
@@ -222,18 +224,18 @@ const daysWord = (n) => { const a = n % 10, b = n % 100; return a === 1 && b !==
 export function requirePro(feature, f) { if (isPro()) return f(); openPro({ feature }); }
 
 export function openPro({ feature = '' } = {}) {
-  if (!ACCOUNTS) return;
   let period = LS.get('proPeriod', 'month');
   const card = el('div', { class: 'am-card am-pro' });
   const s = sheet(card);
   const paint = () => {
-    const pro = isPro(), p = proInfo();
+    const pro = ACCOUNTS && isPro(), p = proInfo();
     const price = PLAN.price[period];
     const seg = el('div', { class: 'am-seg' },
       el('button', { class: 'am-seg-b' + (period === 'month' ? ' on' : ''), onclick: () => { period = 'month'; LS.set('proPeriod', period); paint(); } }, 'Месяц'),
       el('button', { class: 'am-seg-b' + (period === 'year' ? ' on' : ''), onclick: () => { period = 'year'; LS.set('proPeriod', period); paint(); } }, 'Год', el('span', { class: 'am-save' }, '2 месяца в подарок')));
     const buy = () => {
-      if (!account()) { s.close(); openLogin({ reason: 'Подписка привязывается к почте. Так Про будет работать на всех ваших устройствах.', then: () => openCheckout(period) }); }
+      if (SHOP) { s.close(); openCheckout(period); }
+      else if (!account()) { s.close(); openLogin({ reason: 'Подписка привязывается к почте. Так Про будет работать на всех ваших устройствах.', then: () => openCheckout(period) }); }
       else { s.close(); openCheckout(period); }
     };
     const cta = pro
@@ -279,8 +281,14 @@ function openCheckout(period = 'month') {
   let method = 'card';
   const price = PLAN.price[period];
   const start = Date.now(), next = start + periodMs(period);
+  // на сайте почту спрашиваем здесь: на неё придёт чек, и к ней привяжется подписка
+  let email = '';
+  const mailInp = SHOP ? el('input', { class: 'am-inp', type: 'email', name: 'email', autocomplete: 'email', inputmode: 'email', autocapitalize: 'off', spellcheck: 'false', placeholder: 'Почта' }) : null;
+  const mailErr = el('div', { class: 'am-err' });
+  if (mailInp) mailInp.addEventListener('input', () => { email = mailInp.value; mailErr.textContent = ''; });
   const paint = () => {
     const pay = el('button', { class: 'am-btn pro big', onclick: () => submit(pay) }, `Оплатить ${rub(price)}`);
+    if (mailInp) mailInp.value = email;
     card.innerHTML = '';
     put(card, xBtn(s.close),
       el('button', { class: 'am-back-btn', onclick: () => { s.close(); openPro(); } }, ic('left'), 'Назад'),
@@ -291,6 +299,8 @@ function openCheckout(period = 'month') {
         el('div', { class: 'co-line' }),
         el('div', { class: 'co-row total' }, el('span', {}, 'К оплате'), el('span', {}, rub(price))),
         el('div', { class: 'co-next' }, `Следующее списание ${day(next)}. Мы напомним за три дня.`)),
+      SHOP ? el('div', { class: 'co-h' }, 'Почта для чека и подписки') : null,
+      mailInp, SHOP ? mailErr : null,
       el('div', { class: 'co-h' }, 'Способ оплаты'),
       el('div', { class: 'co-methods' },
         ...[['card', 'card', 'Карта'], ['sbp', 'sbp', 'СБП']].map(([id, icn, t]) => el('button', { class: 'co-m' + (method === id ? ' on' : ''), onclick: () => { method = id; paint(); } }, ic(icn), t, el('span', { class: 'co-radio' })))),
@@ -300,6 +310,18 @@ function openCheckout(period = 'month') {
   };
   const submit = (btn) => {
     if (btn.disabled) return;
+    if (SHOP) {
+      const v = (mailInp.value || '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v)) { mailErr.textContent = 'Проверьте адрес почты'; card.classList.remove('shake'); void card.offsetWidth; card.classList.add('shake'); mailInp.focus(); return; }
+      card.innerHTML = '';
+      put(card, xBtn(s.close),
+        el('div', { class: 'am-ico-circle' }, ic('card')),
+        el('h2', { class: 'am-h' }, 'Оплата скоро заработает'),
+        el('p', { class: 'am-sub' }, 'Мы подключаем приём платежей через ЮKassa. Когда подключение закончится, эта кнопка будет открывать защищённую страницу ЮKassa, где можно оплатить картой или через СБП.'),
+        el('p', { class: 'am-sub' }, 'Сейчас деньги не списываются, а доска работает бесплатно.'),
+        el('button', { class: 'am-btn primary', onclick: () => s.close() }, 'Понятно'));
+      return;
+    }
     btn.disabled = true; btn.classList.add('loading'); btn.textContent = '';
     btn.append(el('span', { class: 'am-spin' }));
     setTimeout(() => {
@@ -425,7 +447,7 @@ function avatar(a, cls = '') {
 }
 export function accountControls() {
   const wrap = el('div', { class: 'acc-ctl' });
-  if (!ACCOUNTS) return wrap;
+  if (!ACCOUNTS) { wrap.append(el('button', { class: 'pro-pill', onclick: () => openPro() }, ic('sparkle'), 'Про')); return wrap; }
   const paint = () => {
     if (!wrap.isConnected && wrap._painted) { off(); return; }
     wrap._painted = true;
