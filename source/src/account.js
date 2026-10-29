@@ -260,9 +260,10 @@ const FEATURES = {
   materials: ['folder', 'Материалы в облаке', `Задачи, чертежи и PDF лежат в облаке по папкам, и на уроке вы за несколько секунд перетаскиваете нужное на доску. Вам доступно ${PLAN.proMaterialsGB} ГБ.`],
   templates: ['copy', 'Шаблоны уроков', 'Вы готовите урок один раз, сохраняете его как шаблон и одним нажатием создаёте из него доску для каждого ученика.'],
   answer: ['eyeOff', 'Скрытый ответ', 'Вы заранее пишете решение и закрываете его, а открываете, когда ученик решит задачу сам.'],
+  folders: ['boards', 'Папки для досок', 'Доски раскладываются по папкам, например по ученикам или предметам, и нужная доска находится за секунду.'],
   history: ['history', 'История доски', 'Доска записывает последние 10 часов работы, и запись можно посмотреть как видео. Если ученик стёр решение или вы удалили не тот лист, перемотайте запись на нужную минуту и верните лист на доску.'],
 };
-const FEATURE_ASK = { materials: 'Материалы в облаке', history: 'История доски', templates: 'Шаблоны уроков', answer: 'Скрытый ответ' };
+const FEATURE_ASK = { materials: 'Материалы в облаке', history: 'История доски', templates: 'Шаблоны уроков', answer: 'Скрытый ответ', folders: 'Папки для досок' };
 const per = (period) => (period === 'month' ? 'в месяц' : 'в год');
 const periodMs = (period) => (period === 'month' ? 30 : 365) * DAY;
 // календарный месяц или год, как на сервере: 31 января + месяц = 28 (29) февраля
@@ -409,7 +410,7 @@ export function celebrate() {
   const p = proInfo();
   const card = el('div', { class: 'am-card am-celebrate' });
   const s = sheet(card, { dark: true });
-  const items = [FEATURES.materials, FEATURES.templates, FEATURES.answer, FEATURES.history].map(([icn, t]) => [icn, t]);
+  const items = [FEATURES.materials, FEATURES.templates, FEATURES.answer, FEATURES.folders, FEATURES.history].map(([icn, t]) => [icn, t]);
   put(card, 
     el('div', { class: 'cel-badge' }, el('div', { class: 'cel-ring' }), el('div', { class: 'cel-ring r2' }), proMark('xl')),
     el('div', { class: 'cel-kicker' }, 'Добро пожаловать'),

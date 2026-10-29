@@ -12,7 +12,7 @@ import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, move
 import { ICONS } from './icons.js';
 import { releaseFor } from './changelog.js';
 import { FIGS, figIcon, figPrims } from './figs.js';
-import { SERVER, syncRecent, pushBoard, dropBoard, putBoardFolder, dropBoardFolder, boardSync } from './cloud.js';
+import { SERVER, api, syncRecent, pushBoard, dropBoard, putBoardFolder, dropBoardFolder, boardSync } from './cloud.js';
 import { ACCOUNTS, account, isPro, openPro, openLogin, requirePro, proTag, accountControls, onAccount, inCloud, ownedBoards, PLAN } from './account.js';
 import { materialsPanel } from './materials.js';
 import { startReplay } from './replay.js';
@@ -255,17 +255,50 @@ function roleBox(onPick) {
   return el('div', { class: 'role-choose' }, el('span', { class: 'muted' }, 'Кто вы?'),
     ...Object.entries(ROLE_NAMES).map(([id, label]) => el('button', { class: 'chip', onclick: () => { if (setRole(id)) onPick?.(); } }, label)));
 }
-// Анонимные предложения: Яндекс Форма во всплывающем окне. Имя и статус не передаются.
-const FEEDBACK_URL = 'https://forms.yandex.ru/u/6ad4be566d2d73ec38a5a6c9/';
-function feedbackDialog() {
-  const close = () => m.remove();
-  const src = FEEDBACK_URL ? FEEDBACK_URL + (FEEDBACK_URL.includes('?') ? '&' : '?') + 'iframe=1' : '';
-  const m = el('div', { class: 'modal', onpointerdown: (e) => { if (e.target === m) close(); } },
-    el('div', { class: 'panel dialog fb-dialog' },
-      el('div', { class: 'dialog-h' }, el('b', {}, 'Предложить улучшение'), el('button', { class: 'ibtn fb-x', title: 'Закрыть', onclick: close }, '×')),
-      src ? el('iframe', { class: 'fb-frame', src, title: 'Форма' })
-        : el('div', { class: 'fb-frame fb-empty muted' }, 'Здесь будет форма')));
-  document.body.append(m);
+// Предложения и сообщения о проблемах: своё окно вместо внешней формы. Письмо уходит на сервер Lodl и пересылается на почту.
+const FB_KINDS = [['idea', 'Идея'], ['bug', 'Проблема'], ['wish', 'Пожелание']];
+function feedbackDialog(kind = 'idea') {
+  if (document.querySelector('.fb-dialog')) return;
+  const close = () => { m.remove(); removeEventListener('keydown', onKey, true); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); } };
+  const PH = { idea: 'Например: хочу, чтобы можно было вставлять таблицы', bug: 'Что вы делали и что пошло не так. Например: нажала ластик, и доска перестала отвечать', wish: 'Любые мысли о Lodl' };
+  const seg = el('div', { class: 'fb-seg' });
+  const ta = el('textarea', { class: 'inp fb-ta', maxlength: 5000, rows: 6 });
+  const mailIn = el('input', { class: 'inp', type: 'email', name: 'email', placeholder: 'Ваша почта, если хотите получить ответ', autocomplete: 'email' });
+  // свои адреса — списком под полем: почта аккаунта и те, что уже оставляли раньше
+  const known = [...new Set([account()?.email, ...(LS.get('fbMails', []) || [])].filter(Boolean))].slice(0, 4);
+  const mailList = el('div', { class: 'fb-mails', hidden: true }, ...known.map((m) => el('button', { type: 'button', class: 'fb-mail', onpointerdown: (e) => { e.preventDefault(); mailIn.value = m; mailList.hidden = true; } }, m)));
+  const showList = () => { const v = mailIn.value.trim().toLowerCase(); let any = false; for (const b of mailList.children) { const ok = !v || (b.textContent.startsWith(v) && b.textContent !== v); b.hidden = !ok; any ||= ok; } mailList.hidden = !known.length || !any; };
+  mailIn.addEventListener('focus', showList); mailIn.addEventListener('input', showList); mailIn.addEventListener('blur', () => { mailList.hidden = true; });
+  const mailBox = el('div', { class: 'fb-mailbox' }, mailIn, mailList);
+  const err = el('div', { class: 'err' });
+  const send = el('button', { class: 'btn primary fb-send' }, 'Отправить');
+  const paintSeg = () => { seg.innerHTML = ''; for (const [k, t] of FB_KINDS) seg.append(el('button', { class: 'fb-seg-b' + (k === kind ? ' on' : ''), onclick: () => { kind = k; paintSeg(); ta.placeholder = PH[k]; ta.focus(); } }, t)); };
+  paintSeg(); ta.placeholder = PH[kind];
+  const body = el('div', { class: 'fb-body' },
+    seg, ta, mailBox,
+    err, el('div', { class: 'row end' }, el('button', { class: 'btn', onclick: close }, 'Отмена'), send));
+  const panel = el('div', { class: 'panel dialog fb-dialog' },
+    el('div', { class: 'dialog-h' }, el('b', {}, 'Сделаем Lodl лучше'), el('button', { class: 'ibtn fb-x', title: 'Закрыть', onclick: close }, '×')), body);
+  const m = el('div', { class: 'modal', onpointerdown: (e) => { if (e.target === m) close(); } }, panel);
+  send.addEventListener('click', async () => {
+    const text = ta.value.trim();
+    if (text.length < 3) { err.textContent = 'Напишите хотя бы пару слов'; ta.focus(); return; }
+    send.disabled = true; err.textContent = '';
+    const info = `${navigator.userAgent} · экран ${innerWidth}×${innerHeight} · ${location.hash ? 'доска' : 'главная'}`;
+    try { if (SERVER) await api('POST', '/feedback', { kind, text, contact: mailIn.value.trim(), info }); else await new Promise((r) => setTimeout(r, 400)); }
+    catch (e) { send.disabled = false; err.textContent = e.message; return; }
+    const cm = mailIn.value.trim().toLowerCase(); if (/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(cm)) LS.set('fbMails', [cm, ...(LS.get('fbMails', []) || []).filter((x) => x !== cm)].slice(0, 3));
+    body.innerHTML = '';
+    body.append(el('div', { class: 'fb-done' }, el('div', { class: 'fb-done-ic', html: '<svg viewBox="0 0 52 52"><circle cx="26" cy="26" r="24"/><path d="M15 27l7 7 15-15"/></svg>' }),
+      el('b', {}, 'Спасибо, сообщение отправлено'), el('p', {}, 'Мы прочитаем его в ближайшее время. Если вы оставили почту, ответим на неё.'),
+      el('button', { class: 'btn primary', onclick: close }, 'Хорошо')));
+  });
+  ta.addEventListener('keydown', (e) => { e.stopPropagation(); if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send.click(); });
+  ta.addEventListener('input', () => { err.textContent = ''; });
+  mailIn.addEventListener('keydown', (e) => e.stopPropagation());
+  addEventListener('keydown', onKey, true);
+  document.body.append(m); setTimeout(() => ta.focus(), 30);
 }
 const room = roomFromHash();
 // Переезд со старого адреса: старая страница передала доски и настройки этого браузера по одноразовой метке
@@ -329,7 +362,10 @@ function showStart() {
   const rowEdges = () => { const r = foldersRow; r.classList.toggle('more-l', r.scrollLeft > 2); r.classList.toggle('more-r', r.scrollLeft + r.clientWidth < r.scrollWidth - 2); };
   foldersRow.addEventListener('wheel', (e) => { if (foldersRow.scrollWidth <= foldersRow.clientWidth || Math.abs(e.deltaX) > Math.abs(e.deltaY)) return; e.preventDefault(); foldersRow.scrollLeft += e.deltaY; }, { passive: false });
   foldersRow.addEventListener('scroll', rowEdges); new ResizeObserver(rowEdges).observe(foldersRow);
+  // папки для досок входят в Про
+  const foldersLocked = () => ACCOUNTS && !isPro();
   async function newBoardFolder() {
+    if (foldersLocked()) { openPro({ feature: 'folders' }); return; }
     const n = await uiDialog({ title: 'Новая папка', input: true, placeholder: 'Например: Петя, 9 класс', maxlength: 30, ok: 'Создать' });
     if (!n) return;
     const f = { id: uid(), name: n.slice(0, 30) }; LS.set('bfolders', [...bfolders(), f]); curFolder = f.id; LS.set('bfolderCur', curFolder); renderList();
@@ -337,6 +373,7 @@ function showStart() {
   }
   function moveMenu(r, anchor) {
     document.querySelector('.bf-menu')?.remove();
+    if (foldersLocked()) { openPro({ feature: 'folders' }); return; }
     const close = () => { m.remove(); document.removeEventListener('pointerdown', out, true); };
     const out = (e) => { if (!m.contains(e.target) && e.target !== anchor) close(); };
     const map = folderOf(); const curF = map[r.room] || '';
@@ -390,7 +427,7 @@ function showStart() {
     const all = LS.get('recent', []);
     const q = search.value.trim().toLowerCase();
     renderFolders();
-    newFolderBtn.hidden = !all.length;
+    newFolderBtn.hidden = !all.length; newFolderBtn.classList.toggle('pro-locked', foldersLocked());
     const fmap = folderOf();
     const rows = all.filter((r) => !hiddenRooms.has(r.room) && (!q || (r.title || '').toLowerCase().includes(q) || r.room.includes(q)) && (!curFolder || fmap[r.room] === curFolder));
     listBox.innerHTML = '';
@@ -480,7 +517,103 @@ function showStart() {
     accountControls());
   // условия, реквизиты и политика: их проверяет платёжный сервис, и они нужны покупателям
   const legal = el('div', { class: 'legal' }, el('a', { href: 'terms.html#prices', target: '_blank', rel: 'noopener' }, 'Lodl Про: 199 ₽ в месяц или 1 990 ₽ в год'), el('span', {}, '·'), el('a', { href: 'terms.html', target: '_blank', rel: 'noopener' }, 'Условия и реквизиты'), el('span', {}, '·'), el('a', { href: 'privacy.html', target: '_blank', rel: 'noopener' }, 'Политика конфиденциальности'));
-  document.body.append(el('div', { id: 'start', class: 'with-top' }, top, el('div', { class: 'start-col' }, hint, card, legal)));
+  const fbk = feedbackCard();
+  document.body.append(el('div', { id: 'start', class: 'with-top' }, top, el('div', { class: 'home-row' }, el('div', { class: 'start-col' }, hint, card, legal), fbk)));
+  floatFeedback(fbk, card.parentElement);
+}
+// Карточку предложений можно перетащить куда угодно, кроме главного окна и верхней панели.
+// Пока её несут, она наклоняется по ходу движения, а отпущенная мягко встаёт на место.
+// Её можно свернуть в круглую лампочку. Место и свёрнутость запоминаются.
+function floatFeedback(fbk, col) {
+  const wide = () => innerWidth > 780;
+  const st = LS.get('fbk', {}) || {};
+  let x = 0, y = 0, placed = false;
+  const box = () => fbk.getBoundingClientRect();
+  const keepOut = () => { const r = col.getBoundingClientRect(); return { l: r.left - 18, t: r.top - 18, r: r.right + 18, b: r.bottom + 18 }; };
+  // не за краем экрана, не на верхней панели и не поверх главного окна: если задели окно — отодвигаем в ближнюю сторону
+  const fit = (nx, ny) => {
+    const w = fbk.offsetWidth, h = fbk.offsetHeight, W0 = innerWidth, H0 = innerHeight, top0 = 72;
+    nx = clamp(nx, 10, Math.max(10, W0 - w - 10)); ny = clamp(ny, top0, Math.max(top0, H0 - h - 10));
+    const k = keepOut();
+    if (nx < k.r && nx + w > k.l && ny < k.b && ny + h > k.t) {
+      const opts = [[k.l - w - nx, 0], [k.r - nx, 0], [0, k.t - h - ny], [0, k.b - ny]]
+        .map(([dx, dy]) => [nx + dx, ny + dy, Math.abs(dx) + Math.abs(dy)])
+        .filter(([ax, ay]) => ax >= 10 && ax + w <= W0 - 10 && ay >= top0 && ay + h <= H0 - 10);
+      if (opts.length) { opts.sort((a, b) => a[2] - b[2]); nx = opts[0][0]; ny = opts[0][1]; }
+      else return null; // рядом места нет
+    }
+    return [nx, ny];
+  };
+  const apply = (anim) => { fbk.classList.toggle('settle', !!anim); fbk.style.left = x + 'px'; fbk.style.top = y + 'px'; };
+  const home = () => { // по умолчанию — посередине свободного места слева, на уровне главного окна
+    const k = col.getBoundingClientRect(), w = fbk.offsetWidth;
+    return [Math.max(10, (k.left - w) / 2), k.top + 6];
+  };
+  const place = (anim = false) => {
+    if (!wide()) { fbk.classList.remove('floating-fbk', 'mini'); fbk.style.left = fbk.style.top = ''; placed = false; return; }
+    fbk.classList.add('floating-fbk');
+    fbk.classList.toggle('mini', !!st.mini);
+    const want = st.fx != null ? [st.fx * innerWidth, st.fy * innerHeight] : home();
+    let p = fit(want[0], want[1]);
+    if (!p && !st.mini) { fbk.classList.add('mini'); p = fit(want[0], want[1]) || [10, 80]; } // большой карточке места нет — показываем лампочку
+    [x, y] = p || [10, 80]; apply(anim && placed); placed = true;
+  };
+  // перетаскивание
+  let drag = null;
+  fbk.addEventListener('pointerdown', (e) => {
+    if (!wide() || e.button !== 0 || e.target.closest('.fbk-opt, .fbk-min')) return;
+    e.preventDefault(); fbk.setPointerCapture(e.pointerId);
+    drag = { id: e.pointerId, dx: e.clientX - x, dy: e.clientY - y, sx: e.clientX, sy: e.clientY, vx: 0, lt: e.timeStamp, lx: e.clientX, moved: false };
+    fbk.classList.add('drag'); fbk.classList.remove('settle');
+  });
+  fbk.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) > 4) drag.moved = true;
+    const dt = Math.max(1, e.timeStamp - drag.lt); drag.vx = drag.vx * 0.7 + ((e.clientX - drag.lx) / dt) * 0.3; drag.lt = e.timeStamp; drag.lx = e.clientX;
+    x = clamp(e.clientX - drag.dx, 4, innerWidth - fbk.offsetWidth - 4); y = clamp(e.clientY - drag.dy, 66, innerHeight - fbk.offsetHeight - 4);
+    fbk.style.setProperty('--tilt', clamp(drag.vx * 9, -10, 10).toFixed(2) + 'deg');
+    apply(false);
+  });
+  const drop = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const moved = drag.moved; drag = null;
+    fbk.classList.remove('drag'); fbk.style.setProperty('--tilt', '0deg');
+    if (!moved) { if (fbk.classList.contains('mini')) { st.mini = false; LS.set('fbk', st); place(true); } return; } // щелчок по лампочке — развернуть
+    const p = fit(x, y) || home(); [x, y] = p; apply(true);
+    st.fx = x / innerWidth; st.fy = y / innerHeight; LS.set('fbk', st);
+  };
+  fbk.addEventListener('pointerup', drop); fbk.addEventListener('pointercancel', drop);
+  // свернуть в лампочку
+  const min = el('button', { class: 'fbk-min', title: 'Свернуть', 'aria-label': 'Свернуть', onclick: (e) => { e.stopPropagation(); st.mini = true; LS.set('fbk', st); place(true); } }, el('span', {}));
+  fbk.append(min, el('div', { class: 'fbk-grip', 'aria-hidden': 'true' }));
+  fbk.title = '';
+  requestAnimationFrame(() => { place(false); fbk.classList.add('ready'); });
+  addEventListener('resize', () => place(false));
+  new ResizeObserver(() => { if (!drag) place(false); }).observe(col);
+}
+// Карточка «Предложения и проблемы» слева от главной: лампочка рисуется сама, как ручкой на доске
+function feedbackCard() {
+  const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+  const IC = {
+    idea: svg('<path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3.6 10.8c.7.6 1.1 1.3 1.1 2.2h5c0-.9.4-1.6 1.1-2.2A6 6 0 0 0 12 3z"/>'),
+    bug: svg('<path d="M12 8v5M12 16.5v.01"/><path d="M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0z"/>'),
+    wish: svg('<path d="M12 3.5l2.4 5 5.4.6-4 3.7 1.1 5.3L12 15.4 7.1 18.1l1.1-5.3-4-3.7 5.4-.6z"/>'),
+    go: svg('<path d="M9 6l6 6-6 6"/>'),
+  };
+  const art = '<svg class="fbk-doodle" viewBox="0 0 120 120" aria-hidden="true">'
+    + '<path class="d1" d="M60 22c-18 0-30 13-30 29 0 11 6 18 12 24 4 4 5 8 5 12h26c0-4 1-8 5-12 6-6 12-13 12-24 0-16-12-29-30-29z"/>'
+    + '<path class="d2" d="M49 96h22M52 105h16"/>'
+    + '<path class="d3" d="M60 6v7M27 19l5 5M93 19l-5 5M14 51h8M98 51h8"/>'
+    + '<path class="d4" d="M52 70l4-7 4 7 4-7 4 7"/></svg>';
+  const opt = (ic, t, d) => el('button', { class: 'fbk-opt', onclick: () => feedbackDialog(ic === 'idea' ? 'idea' : ic === 'bug' ? 'bug' : 'wish') },
+    el('span', { class: 'fbk-ic', html: IC[ic] }), el('span', { class: 'fbk-t' }, el('b', {}, t), el('span', {}, d)), el('span', { class: 'fbk-go', html: IC.go }));
+  return el('aside', { class: 'fbk' },
+    el('div', { class: 'fbk-art', html: art, title: 'Предложения и проблемы' }),
+    el('h2', {}, 'Сделаем Lodl лучше вместе'),
+    el('p', {}, 'Расскажите, что мешает на уроке и чего не хватает. Мы читаем каждое сообщение и исправляем найденное.'),
+    opt('idea', 'Предложить идею', 'Что добавить в доску'),
+    opt('bug', 'Сообщить о проблеме', 'Ошибка или неудобство'),
+    opt('wish', 'Написать пожелание', 'Любые мысли о Lodl'));
 }
 
 // ============ доска ============
@@ -637,7 +770,12 @@ function startBoard(room) {
   const cvMain = el('canvas', { id: 'cv-main' });
   const cvOver = el('canvas', { id: 'cv-over' });
   const ctx = cvMain.getContext('2d', { alpha: false });
-  const octx = cvOver.getContext('2d', { desynchronized: true });
+  // Верхний слой выводится на экран без ожидания (так линия меньше отстаёт от пера). Очищать такой холст на виду нельзя:
+  // экран может успеть показать его пустым, и линия мигает. Поэтому кадр рисуем на скрытом холсте и целиком переносим.
+  const ovVis = cvOver.getContext('2d', { desynchronized: true });
+  const ovBuf = document.createElement('canvas');
+  const octx = ovBuf.getContext('2d');
+  let endGhost = null; // только что законченная линия: держим её на верхнем слое, пока нижний слой не покажет её сам
   let inkPresenter = null;
   try { navigator.ink?.requestPresenter?.({ presentationArea: cvOver }).then((pr) => { inkPresenter = pr; }).catch(() => {}); } catch {}
   const topLeft = el('div', { class: 'bar tl' });
@@ -936,6 +1074,7 @@ function startBoard(room) {
 
   function renderOver() {
     const v = S.view;
+    if (ovBuf.width !== cvOver.width || ovBuf.height !== cvOver.height) { ovBuf.width = cvOver.width; ovBuf.height = cvOver.height; }
     octx.setTransform(DPR, 0, 0, DPR, 0, 0);
     octx.clearRect(0, 0, W, H);
     octx.setTransform(DPR * v.z, 0, 0, DPR * v.z, DPR * v.x, DPR * v.y);
@@ -954,6 +1093,7 @@ function startBoard(room) {
       if (pv.ov && pv.ov.copy) { octx.globalAlpha = 0.75; for (const id of pv.ov.ids) { const it = items.get(id); if (it) drawItem(octx, it, pv.ov, v.z); } octx.globalAlpha = 1; }
     }
     if (g && g.drawOver) g.drawOver(octx);
+    else if (endGhost) { if (performance.now() - endGhost.t < 120) endGhost.draw(octx); else endGhost = null; }
     drawPolyPreview(octx);
     // выделение
     octx.setTransform(DPR, 0, 0, DPR, 0, 0);
@@ -1006,6 +1146,7 @@ function startBoard(room) {
     }
     if (g && g.drawScreen) g.drawScreen(octx);
     // чужие курсоры — только если включено в меню (по умолчанию скрыты)
+    ovVis.setTransform(1, 0, 0, 1, 0, 0); ovVis.globalCompositeOperation = 'copy'; ovVis.drawImage(ovBuf, 0, 0); ovVis.globalCompositeOperation = 'source-over';
   }
 
   // ---------- страницы ----------
@@ -1327,7 +1468,7 @@ function startBoard(room) {
   }
 
   // ---------- ввод ----------
-  let gesture = null, hover = null, penSeenAt = 0;
+  let gesture = null, hover = null, penSeenAt = 0, drawEndAt = -1e9;
   const touches = new Map();
   let pinch = null;
   function readPoint(e, kind) {
@@ -1340,6 +1481,7 @@ function startBoard(room) {
     return [wx, wy, p, e.clientX, e.clientY];
   }
   function eraserRadius() { return sz('eraser') / 2; }
+  const eraseR = () => (eraserRadius() + 2) / S.view.z; // стирает по видимому краю курсора (у круга есть белая обводка)
   function currentColor() { return S.tool === 'hl' ? prefs.hlColor : prefs.penColor; }
 
   cvOver.addEventListener('pointerdown', onDown, { passive: false });
@@ -1363,7 +1505,13 @@ function startBoard(room) {
     if (radialEl) { closeRadial(); if (e.button !== 2) return; }
     if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
     closePopovers();
-    if (S.editingId || editorOpen) closeEditors(true);
+    const wasEditing = !!(S.editingId || editorOpen);
+    if (wasEditing) closeEditors(true);
+    // написали текст или формулу и щёлкнули по пустому месту — текст готов, дальше пишем ручкой
+    if (wasEditing && e.button === 0 && ['text', 'tex', 'graph', 'note'].includes(S.tool)) {
+      const [wx0, wy0] = toWorld(e.clientX, e.clientY); const hit = topHit(wx0, wy0);
+      if (!hit || hit.type !== S.tool) { setTool('pen', { noToggle: true }); return; }
+    }
     const kind = e.pointerType;
     if (kind === 'pen') penSeenAt = Date.now();
     if (kind === 'touch') {
@@ -1476,7 +1624,7 @@ function startBoard(room) {
   function onUp(e) {
     if (e.pointerType === 'touch') { touches.delete(e.pointerId); if (pinch && touches.size < 2) { pinch = null; viewChanged(); } }
     if (gesture && gesture.pid === e.pointerId) {
-      const g = gesture; gesture = null;
+      const g = gesture; gesture = null; drawEndAt = performance.now();
       try { cvOver.releasePointerCapture(e.pointerId); } catch {}
       if (g.finalPoint && e.type === 'pointerup' && Number.isFinite(e.clientX)) { const q = toWorld(e.clientX, e.clientY); g.finalPoint([q[0], q[1], 0.5]); }
       g.end(e);
@@ -1500,6 +1648,9 @@ function startBoard(room) {
   // колесо: Ctrl/щипок трекпада — масштаб; колесо мыши — масштаб (или прокрутка, см. настройки)
   cvOver.addEventListener('wheel', (e) => {
     e.preventDefault();
+    // Перо на Windows: быстрый штрих система принимает за «взмах» и присылает прокрутку, и доска уезжает.
+    // Прокрутку во время письма и сразу после него не принимаем (масштаб с Ctrl работает всегда).
+    if (!e.ctrlKey && !e.metaKey && (gesture || performance.now() - drawEndAt < 700)) return;
     // Колесо: вверх/вниз. Shift+колесо: влево/вправо. Ctrl+колесо или щипок на тачпаде: масштаб.
     // Тачпад двумя пальцами: свободно в любую сторону (берём обе оси сразу).
     const k = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? H : 1;
@@ -1507,7 +1658,8 @@ function startBoard(room) {
     const looksLikeMouse = e.deltaMode === 1 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
     if (e.ctrlKey || e.metaKey || (prefs.wheel === 'zoom' && looksLikeMouse && !e.shiftKey)) {
       const pinch = e.ctrlKey && !looksLikeMouse;
-      zoomAt(e.clientX, e.clientY, Math.exp(-clamp(dy, -120, 120) * (pinch ? 0.01 : 0.0022)));
+      if (pinch) zoomAt(e.clientX, e.clientY, Math.exp(-clamp(dy, -120, 120) * 0.01));
+      else if (dy) zoomStep(dy < 0 ? 1 : -1, e.clientX, e.clientY); // щелчок колеса — шаг 5%
       return;
     }
     if (e.shiftKey && !dx) { dx = dy; dy = 0; }
@@ -1693,6 +1845,8 @@ function startBoard(room) {
         addItem({ id, type: 'stroke', page: S.page, z: prev ? prev.z : zTop(S.page), x: x0, y: y0, s: 1, color: g.color, size: g.size, kind, v: 2, thin: g.thin, ...(q === 100 ? { q } : {}), pts: encodePts(local, q) });
       });
       if (g.prevId) S.hidden.delete(g.prevId);
+      // непрозрачная линия ещё пару кадров остаётся на верхнем слое, иначе на миг пропадает (полупрозрачный маркер дал бы двойной цвет)
+      if (kind !== 'hl') { endGhost = { draw: g.drawOver, t: performance.now() }; setTimeout(() => invalidate(false), 130); }
       lastInk = { id, t: performance.now(), kind, color: g.color, size: g.size, keys: sb.keys, end: sb.isDot ? [sb.start[0], sb.start[1]] : [sb.raw[0], sb.raw[1]] };
       liveEnd(g);
     };
@@ -1799,9 +1953,9 @@ function startBoard(room) {
     let last = pt;
     const g = { isEraser: true, sid: uid(), precise };
     g.pvEraser = () => (precise ? { sid: g.sid, pts: trail } : null);
-    const rec = (p) => { trail.push([Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10, Math.round(eraserRadius() / S.view.z * 100) / 100]); };
+    const rec = (p) => { trail.push([Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10, Math.round(eraseR() * 100) / 100]); };
     const trail = []; // точки ластика — собеседник повторяет по ним стирание
-    const apply = (wx, wy) => { eraseApply(S, wx, wy, eraserRadius() / S.view.z, precise); };
+    const apply = (wx, wy) => { eraseApply(S, wx, wy, eraseR(), precise); };
     // круги ластика ставим часто (через 0,3 радиуса) — край стёртого ровный, без зубцов
     const step = (p) => {
       const d = Math.hypot(p[0] - last[0], p[1] - last[1]); const r = eraserRadius() / S.view.z;
@@ -3186,7 +3340,7 @@ function startBoard(room) {
       e.preventDefault();
       if (e.repeat) return;
       let t = keyTool[k];
-      if (t === 'hw' && !tutorView()) return; // метки ставит только репетитор
+      if (t === 'hw') return; // метки «Д/З» пока убраны
       if (t === 'line' && S.tool === 'line') t = 'dline'; // L, L — пунктирная
       // Короткое нажатие — инструмент остаётся. Зажала и поработала — после отпускания вернётся прежний.
       if (SPRING_TOOLS.has(t) && !spring) spring = { code: e.code, prev: S.tool, used: false };
@@ -3536,7 +3690,7 @@ function startBoard(room) {
     const out = [];
     for (const b of barOrder()) {
       if (b === '|') { if (out.length && out[out.length - 1] !== '|') out.push('|'); continue; }
-      if (b === 'hw' && prefs.role === 'student') continue; // пометки ставит репетитор
+      if (b === 'hw') continue; // метки «Д/З» пока убраны
       if (!hidden.has(b)) out.push(b);
     }
     while (out[out.length - 1] === '|') out.pop();
@@ -3570,14 +3724,49 @@ function startBoard(room) {
     return gp;
   }
   function closeGroupPop() {
+    stopAim();
     const gp = groupPop; groupPop = null; if (!gp) return;
     gp.el.remove(); gp.bridge?.remove(); popovers.delete(gp.el); popovers.delete(gp.bridge);
   }
+  // Курсор ушёл с кнопки наискосок к окну: окно не закрываем, пока он движется внутри треугольника
+  // от точки ухода к ближнему краю окна (так делают меню в macOS). Свернул в сторону или замер — окно закрывается.
+  var aim = null; // var: closeGroupPop может вызваться раньше этой строки
+  function stopAim() { if (!aim) return; document.removeEventListener('pointermove', aim.mv, true); clearTimeout(aim.t); aim = null; }
   function scheduleGroupClose(e) {
     const gp = groupPop; if (!gp) return;
     const to = e && e.relatedTarget;
     if (to && to.nodeType === 1 && (gp.el.contains(to) || gp.bridge.contains(to) || to.closest(`[data-grp="${gp.gname}"]`))) return;
-    closeGroupPop();
+    stopAim();
+    const x0 = e && e.clientX, y0 = e && e.clientY;
+    if (!e || e.pointerType !== 'mouse' || !Number.isFinite(x0) || !gp.el.isConnected) { closeGroupPop(); return; }
+    const r = gp.el.getBoundingClientRect(), M = 28;
+    // ближний к курсору край окна, расширенный на M с обеих сторон
+    let c1, c2;
+    if (y0 <= r.top) { c1 = [r.left - M, r.top]; c2 = [r.right + M, r.top]; }
+    else if (y0 >= r.bottom) { c1 = [r.left - M, r.bottom]; c2 = [r.right + M, r.bottom]; }
+    else if (x0 <= r.left) { c1 = [r.left, r.top - M]; c2 = [r.left, r.bottom + M]; }
+    else if (x0 >= r.right) { c1 = [r.right, r.top - M]; c2 = [r.right, r.bottom + M]; }
+    else { closeGroupPop(); return; }
+    const side = (ax, ay, bx, by, px, py) => (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+    const inTri = (px, py) => {
+      // точку ухода чуть отодвигаем назад, чтобы дрожание руки на старте не закрывало окно
+      const cx = (c1[0] + c2[0]) / 2, cy = (c1[1] + c2[1]) / 2, L = Math.hypot(cx - x0, cy - y0) || 1;
+      const ax = x0 - ((cx - x0) / L) * 6, ay = y0 - ((cy - y0) / L) * 6;
+      const d1 = side(ax, ay, c1[0], c1[1], px, py), d2 = side(c1[0], c1[1], c2[0], c2[1], px, py), d3 = side(c2[0], c2[1], ax, ay, px, py);
+      return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0));
+    };
+    const giveUp = () => { const g = groupPop; stopAim(); if (g === gp && !gp.el.matches(':hover') && !gp.bridge.matches(':hover')) closeGroupPop(); };
+    aim = {
+      t: setTimeout(giveUp, 350),
+      mv: (ev) => {
+        if (groupPop !== gp) { stopAim(); return; }
+        const t = ev.target;
+        if (t && t.nodeType === 1 && (gp.el.contains(t) || gp.bridge.contains(t) || t.closest?.(`[data-grp="${gp.gname}"]`))) { stopAim(); return; } // долетел до окна или вернулся на кнопку
+        if (inTri(ev.clientX, ev.clientY)) { clearTimeout(aim.t); aim.t = setTimeout(giveUp, 350); return; }
+        stopAim(); closeGroupPop();
+      },
+    };
+    document.addEventListener('pointermove', aim.mv, true);
   }
   function renderToolbar() {
     clearTimeout(hoverTimer); // открытое окно остаётся привязанным: у новых кнопок тот же data-grp
@@ -3960,7 +4149,10 @@ function startBoard(room) {
     else { hwPop.style.left = Math.round(Math.max(8, r.left)) + 'px'; hwPop.style.top = Math.round(Math.max(8, r.top - h - 10)) + 'px'; }
     setTimeout(() => document.addEventListener('pointerdown', hwPopOut, true), 0);
   }
+  // Метки «Д/З» пока убраны: инструмента и списка нет, старые метки на досках остаются
+  const HW_OFF = true;
   function renderHw() {
+    if (HW_OFF) { hwBox.hidden = true; return; }
     const marks = [...items.values()].filter((i) => i.type === 'hw' && pages().some((p) => p.id === i.page));
     const ord = new Map(pages().map((p, k) => [p.id, k]));
     marks.sort((a, b) => (ord.get(a.page) - ord.get(b.page)) || (a.n - b.n));
@@ -4070,8 +4262,9 @@ function startBoard(room) {
     const d = modal('Что нового', body); d.m.querySelector('.dialog').classList.add('rel-dialog');
   }
   const relAt = (() => { const m = /^(\d{4})\.(\d\d)\.(\d\d)-(\d\d)(\d\d)(\d\d)$/.exec(__VERSION__); return m ? Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : 0; })();
+  void relAt;
   var whatsNew = el('button', { class: 'bar whatsnew', onclick: () => showRelease() }, el('span', { class: 'wn-dot' }), 'Что нового?');
-  if (relAt && Date.now() - relAt < 24 * 3600 * 1000) { app.append(whatsNew); placeWhatsNew(); setTimeout(() => whatsNew.remove(), Math.max(0, relAt + 24 * 3600 * 1000 - Date.now())); }
+  // кнопка «Что нового?» постоянно не висит: она есть только в окне с предложением обновиться
   // Новая версия на сайте: тихо проверяем раз в несколько минут и при возврате на вкладку
   if (location.protocol.startsWith('http')) {
     let shown = false;
@@ -4092,11 +4285,35 @@ function startBoard(room) {
     document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
   }
   // Масштаб — снизу справа. Шаг как у Ctrl + колесо, от центра экрана.
-  const ZSTEPS = [0.1, 0.15, 0.25, 0.33, 0.5, 0.67, 0.8, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10, 12];
-  function zoomStep(d) {
-    const z = S.view.z;
-    const next = d > 0 ? ZSTEPS.find((v) => v > z * 1.001) ?? 12 : [...ZSTEPS].reverse().find((v) => v < z / 1.001) ?? 0.1;
-    zoomAt(W / 2, H / 2, next / z);
+  // шаг 10 процентов (выше 400% — 25, иначе до 1200% не докрутить), значения ровные: 100, 110, 120…
+  function zoomStep(d, x = W / 2, y = H / 2) {
+    const pc = S.view.z * 100;
+    const st = (v) => (v < 400 ? 10 : 25);
+    const up = d > 0, s0 = st(up ? pc + 1e-6 : pc - 1e-6);
+    const next = clamp((up ? Math.floor(pc / s0 + 1e-6) + 1 : Math.ceil(pc / s0 - 1e-6) - 1) * s0, 10, 1200) / 100;
+    zoomAt(x, y, next / S.view.z);
+  }
+  // Кнопка масштаба: нажатие — шаг 10%, удержание — масштаб меняется сам, всё быстрее и быстрее
+  function holdZoom(btn, d) {
+    let raf = 0, timer = 0, t0 = 0, last = 0;
+    const stop = () => { clearTimeout(timer); cancelAnimationFrame(raf); raf = timer = 0; };
+    const tick = (t) => {
+      const dt = Math.min(0.05, (t - last) / 1000); last = t;
+      const speed = Math.min(1.7, 0.35 + 0.9 * ((t - t0) / 1000)); // во сколько раз (по логарифму) за секунду: сначала медленно, потом быстрее
+      const z = S.view.z, nz = clamp(z * Math.exp(d * speed * dt), 0.1, 12);
+      if (nz === z) { stop(); return; }
+      zoomAt(W / 2, H / 2, nz / z);
+      raf = requestAnimationFrame(tick);
+    };
+    btn.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault(); stop(); zoomStep(d);
+      timer = setTimeout(() => { t0 = last = performance.now(); raf = requestAnimationFrame(tick); }, 380);
+      const up = () => { stop(); removeEventListener('pointerup', up, true); removeEventListener('pointercancel', up, true); removeEventListener('blur', up); };
+      addEventListener('pointerup', up, true); addEventListener('pointercancel', up, true); addEventListener('blur', up);
+    });
+    btn.addEventListener('click', (e) => { if (e.detail === 0) zoomStep(d); }); // с клавиатуры (Enter, пробел)
+    return btn;
   }
   // Отменить / вернуть — сверху, сразу справа от названия и листов. На узком экране, где сверху нет места, — снизу у масштаба.
   const urBtns = [
@@ -4107,9 +4324,9 @@ function startBoard(room) {
   app.append(urBar);
   // Снизу справа — масштаб
   const zoomBar = el('div', { class: 'bar zoombar' },
-    el('button', { class: 'tbtn', title: 'Отдалить (Ctrl −)', onclick: () => zoomStep(-1) }, icon('minus')),
+    holdZoom(el('button', { class: 'tbtn', title: 'Отдалить (Ctrl −). Зажмите, чтобы отдалять плавно' }, icon('minus')), -1),
     zoomBtn,
-    el('button', { class: 'tbtn', title: 'Приблизить (Ctrl +)', onclick: () => zoomStep(1) }, icon('plus')));
+    holdZoom(el('button', { class: 'tbtn', title: 'Приблизить (Ctrl +). Зажмите, чтобы приближать плавно' }, icon('plus')), 1));
   document.body.append(zoomBar);
   function renderZoom() { zoomBtn.textContent = Math.round(S.view.z * 100) + '%'; }
   // Панель инструментов всегда строго по центру. Строку выбираем только по ширине окна
@@ -4315,7 +4532,7 @@ function startBoard(room) {
   function showHelp() {
     const rows = [
       ['Инструменты', ''],
-      ...TOOLS.filter((t) => !t.sep && t.key && !t.hidden && (t.id !== 'hw' || tutorView())).map((t) => [t.name + (t.hint ? ` (${t.hint})` : ''), t.key]),
+      ...TOOLS.filter((t) => !t.sep && t.key && !t.hidden && t.id !== 'hw').map((t) => [t.name + (t.hint ? ` (${t.hint})` : ''), t.key]),
       ['Цвета 1–8, толщина', '1 … 8, [ ]'],
       ['Отменить своё / вернуть', 'Ctrl+Z / Ctrl+Shift+Z, Ctrl+Y'],
       ['Удалить выделенное', 'Delete'],

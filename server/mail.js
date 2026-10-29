@@ -53,12 +53,14 @@ const T = {
       { text: `Про будет работать до ${d.until}. Мы попробуем списать оплату ещё раз завтра. Можно не ждать и оплатить подписку с другой карты.` },
       { button: 'Оплатить подписку', href: d.site + '/?sub=1' }] }),
 };
+T.feedback = (d) => ({ subject: `Lodl: ${d.kind.toLowerCase()} от пользователя`, title: `${d.kind} от пользователя`, pre: d.text.slice(0, 80),
+  blocks: [{ text: d.text }, { muted: `Почта для ответа: ${d.contact}` }, { muted: d.info }] });
 const textOf = (m) => [m.title, '', ...m.blocks.map((b) => b.code || b.text || b.muted || (b.button ? `${b.button}: ${b.href}` : '')).filter(Boolean)].join('\n\n');
 
 async function send(to, kind, data) {
   const m = T[kind](data);
   const t = tr();
   if (!t) { console.log(`[письмо не отправлено: почта не настроена] ${to}: ${m.subject}`); return; }
-  await t.sendMail({ from: env.MAIL_FROM || `Lodl <no-reply@${new URL(data.site).hostname}>`, to, subject: m.subject, text: textOf(m), html: layout({ site: data.site, ...m }) });
+  await t.sendMail({ from: env.MAIL_FROM || `Lodl <no-reply@${new URL(data.site).hostname}>`, to, ...(data.replyTo ? { replyTo: data.replyTo } : {}), subject: m.subject, text: textOf(m), html: layout({ site: data.site, ...m }) });
 }
 module.exports = { send, ready, preview: (kind, data) => layout({ site: data.site, ...T[kind](data) }) };

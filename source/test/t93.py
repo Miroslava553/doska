@@ -35,7 +35,7 @@ with sync_playwright() as p:
     r('Про не включился', 'Подписка' not in pg.inner_text('.pro-pill'))
     # повтор: двойное нажатие «Оплатить» даёт один платёж
     decline['on'] = False
-    pg.click('text=Попробовать ещё раз'); pg.wait_for_timeout(400); pg.click('.am-btn.pro.big'); pg.wait_for_timeout(400)
+    pg.click('text=Оплатить снова'); pg.wait_for_timeout(400); pg.click('.am-btn.pro.big'); pg.wait_for_timeout(400)
     n0 = len(sql("select id from payments"))
     pg.dblclick('.am-checkout .am-btn.pro.big'); pg.wait_for_timeout(3500)
     r('двойное нажатие: один новый платёж', len(sql("select id from payments")) == n0 + 1)

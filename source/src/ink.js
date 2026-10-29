@@ -65,6 +65,11 @@ export function buildInk(keys, o) {
     if (isCorner[i + 1]) breaks.push(dense.length - 1);
   }
   breaks.push(dense.length - 1);
+  if (o.withIdx) { // номер каждой ключевой точки в плотном ряду (для дорисовки линии по кусочку)
+    const idx = [0]; let k = 0;
+    for (let i = 0; i < n - 1; i++) { const segs = Math.max(1, Math.min(96, Math.ceil(seg[i] / step))); k += segs; idx.push(k); }
+    o.idxOut = idx;
+  }
   // 2) усреднение вдоль линии, отдельно на каждом куске между углами (углы и концы — неподвижны)
   const out = dense.map((q) => [q[0], q[1], q[2]]);
   for (let b = 0; b < breaks.length - 1; b++) {

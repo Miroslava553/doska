@@ -14,8 +14,9 @@ export const TAP_SLOP = 3;    // экранные px: меньше — это т
 export const DOT_MIN_P = 0.55; // точка всегда заметная
 export const PROFILES = {
   // сглаживание лёгкое: линия идёт ровно там, где ведёшь, даже маленький кружок не «скругляется в квадрат»
-  pen: { filter: true, step: 1, base: 2, spread: 0, max: 2 },
-  mouse: { filter: false, step: 1, base: 6, spread: 1.4, max: 18 },
+  // линия идёт ровно по точкам, которые прислало перо или мышь: без усреднения и без подтягивания
+  pen: { filter: false, step: 1, base: 0, spread: 0, max: 0 },
+  mouse: { filter: false, step: 1, base: 0, spread: 0, max: 0 },
 };
 
 // «1€» (Casiez и др., 2012). zoom() — текущий масштаб, чтобы скорость считалась в экранных пикселях.
@@ -81,10 +82,27 @@ export class StrokeBuilder {
     if (this.tipF) { this.tip = this.tipF(x, y, this.tip[2], (this.lastT || 0) + 8); this.tip[2] = this.keys[this.keys.length - 1][2]; }
     else { const L = this.keys[this.keys.length - 1]; if (Math.hypot(x - L[0], y - L[1]) * this.zoom() >= 0.75) { this.keys.push([x, y, L[2]]); this.dirty = true; } }
   }
+  // Линия строится заново только на последнем кусочке: начало, которое уже не изменится, берётся из прошлого кадра.
+  // Так длинная линия (и линия при сильном увеличении, где точек много) рисуется так же быстро, как короткая.
   geometry() {
     if (this.straightLine) return this.straightKeys;
     if (this.isDot || this.keys.length < 2) return this.keys;
-    if (this.dirty || !this.cache) { this.cache = buildInk(this.keys, this.opts); this.dirty = false; }
+    if (this.dirty || !this.cache) {
+      const o = this.opts, n = this.keys.length, C = 12, ci = this.cacheInfo;
+      const exact = o.base === 0 && (o.max ?? 0) === 0; // без усреднения каждая точка зависит только от соседей
+      if (exact && ci && ci.z === this.zoom() && n > ci.n && ci.n > 2 * C + 2) {
+        const s = ci.n - C; // отсюда пересчитываем
+        const so = { ...o, withIdx: true }; const sub = buildInk(this.keys.slice(s - C), so); const sIdx = so.idxOut;
+        const base = ci.idx[s], cut = sIdx[C];
+        const dense = this.cache.slice(0, base + 1).concat(sub.slice(cut + 1));
+        const idx = ci.idx.slice(0, s + 1); for (let k = C + 1; k < sIdx.length; k++) idx.push(sIdx[k] - cut + base);
+        this.cache = dense; this.cacheInfo = { n, idx, z: ci.z };
+      } else {
+        const so = { ...o, withIdx: true }; this.cache = buildInk(this.keys, so);
+        this.cacheInfo = exact ? { n, idx: so.idxOut, z: this.zoom() } : null;
+      }
+      this.dirty = false;
+    }
     return this.cache;
   }
   // то, что рисуется во время письма: линия + кончик + до самого пера

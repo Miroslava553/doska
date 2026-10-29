@@ -2,7 +2,7 @@
 'use strict';
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), http = require('node:http');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lodl-e2e-'));
-Object.assign(process.env, { DATA_DIR: dir, SITE_URL: 'http://127.0.0.1:4021', SHOP_ID: 'shop1', SECRET_KEY: 'key1', YK_API: 'http://127.0.0.1:4020', AUTOPAY: process.env.AUTOPAY || '1', STATIC_DIR: path.join(__dirname, '../../dist/lodl'), OLD_ORIGIN: 'http://localhost:4031' });
+Object.assign(process.env, { DATA_DIR: dir, SITE_URL: 'http://127.0.0.1:4021', SHOP_ID: 'shop1', SECRET_KEY: 'key1', YK_API: 'http://127.0.0.1:4020', AUTOPAY: process.env.AUTOPAY || '1', STATIC_DIR: path.join(__dirname, '../../dist/lodl'), OLD_ORIGIN: 'http://localhost:4031', FEEDBACK_TO: 'owner@lodl.test' });
 const yk = require('./mockyk.js');
 const mails = []; const ol = console.log; console.log = (...a) => { const s = a.join(' '); if (s.includes('[письмо')) { mails.push(s); ol(s); } else ol(...a); };
 const { server, renewTick, db } = require('../index.js');

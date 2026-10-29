@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS kv (user INTEGER NOT NULL REFERENCES users(id) ON DEL
 CREATE TABLE IF NOT EXISTS blobs (user INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, id TEXT, size INTEGER, type TEXT, t INTEGER, PRIMARY KEY (user, id));
 CREATE TABLE IF NOT EXISTS boards (room TEXT PRIMARY KEY, state BLOB, size INTEGER, t INTEGER);
 CREATE INDEX IF NOT EXISTS pay_user ON payments(user);
+CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, t INTEGER, kind TEXT, text TEXT, contact TEXT, user INTEGER, info TEXT);
 `);
 const q = (sql) => { const st = db.prepare(sql); return { get: (...a) => st.get(...a), all: (...a) => st.all(...a), run: (...a) => st.run(...a) }; };
 const tx = (f) => { db.exec('BEGIN IMMEDIATE'); try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
@@ -314,6 +315,22 @@ route('POST', /^\/api\/yk\/hook$/, async ({ req }) => {
   if (typeof id !== 'string' || !q('SELECT 1 FROM payments WHERE id = ?').get(id)) return { ok: true };
   await refreshPayment(id); return { ok: true };
 }, { anon: true, noCsrf: true });
+
+// предложения и сообщения о проблемах: сохраняем и пересылаем на почту
+const FB_KINDS = { idea: 'Идея', bug: 'Проблема', wish: 'Пожелание' };
+route('POST', /^\/api\/feedback$/, async ({ req, user, ip }) => {
+  if (!limit('fb:' + ip, 8, 3600e3)) throw fail(429, 'Вы отправили много сообщений подряд. Попробуйте через час.');
+  const b = await json(req, 6e4);
+  const kind = FB_KINDS[b.kind] ? b.kind : 'idea';
+  const text = String(b.text || '').trim().slice(0, 5000); if (text.length < 3) throw fail(400, 'Напишите хотя бы пару слов');
+  const contact = String(b.contact || '').trim().slice(0, 120);
+  const info = String(b.info || '').slice(0, 600);
+  // почту из аккаунта не берём: человек сам решает, оставить ли адрес для ответа
+  q('INSERT INTO feedback (t, kind, text, contact, user, info) VALUES (?,?,?,?,?,?)').run(now(), kind, text, contact, null, info);
+  const to = env.FEEDBACK_TO || env.SMTP_USER;
+  if (to) mail.send(to, 'feedback', { site: SITE, kind: FB_KINDS[kind], text, contact: contact || 'не указана', info, replyTo: okEmail(contact) ? contact : '' }).catch((e) => log('mail feedback', e.message));
+  return { ok: true };
+}, { anon: true });
 
 // облако: записи (папки, материалы, шаблоны, список досок)
 const proOrThrow = (user) => { if (!proActive(subOf(user))) throw fail(402, 'Нужна подписка Про'); };
