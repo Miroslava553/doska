@@ -110,6 +110,12 @@ systemctl enable -q --now lodl.service lodl-update.timer lodl-backup.timer
 systemctl restart lodl.service
 
 say "6/7 Включаем HTTPS для $DOMAIN"
+# другой веб-сервер (например, nginx с заглушкой) занимает нужные порты: выключаем его
+for w in nginx apache2 httpd; do
+  if systemctl is-active -q $w 2>/dev/null || systemctl is-enabled -q $w 2>/dev/null; then
+    echo "Выключаем $w"; systemctl disable --now $w || true
+  fi
+done
 cat > /etc/caddy/Caddyfile <<EOF
 $DOMAIN {
 	encode zstd gzip
