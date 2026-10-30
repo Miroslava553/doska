@@ -257,7 +257,7 @@ function deleteAccount() {
 // ---------- тарифы ----------
 // Пишем просто и по делу: сначала ситуация, знакомая репетитору, потом что меняется с Про.
 const FEATURES = {
-  materials: ['folder', 'Материалы в облаке', `Задачи, чертежи и PDF лежат в облаке по папкам, и на уроке вы за несколько секунд перетаскиваете нужное на доску. Вам доступно ${PLAN.proMaterialsGB} ГБ.`],
+  materials: ['folder', 'Материалы в облаке', `Задачи, чертежи и PDF лежат в облаке по папкам, и на уроке вы сразу перетаскиваете нужное на доску. Вам доступно ${PLAN.proMaterialsGB} ГБ.`],
   templates: ['copy', 'Шаблоны уроков', 'Вы готовите урок один раз, сохраняете его как шаблон и одним нажатием создаёте из него доску для каждого ученика.'],
   answer: ['eyeOff', 'Скрытый ответ', 'Вы заранее пишете решение и закрываете его, а открываете, когда ученик решит задачу сам.'],
   folders: ['boards', 'Папки для досок', 'Доски раскладываются по папкам, например по ученикам или предметам, и нужная доска находится за секунду.'],
@@ -302,7 +302,6 @@ export function openPro({ feature = '' } = {}) {
       raising ? el('div', { class: 'pw-raise' },
         el('div', { class: 'pw-raise-h' }, `С ${day(raiseAt())} Про будет стоить ${rub(PLAN.raise.month)} в месяц`),
         el('div', { class: 'pw-raise-t' }, `Если вы оформите подписку до этой даты, для вас цена останется ${rub(PLAN.price.month)}, пока подписка действует. До повышения осталось ${daysLeft()} ${daysWord(daysLeft())}.`)) : null,
-      feature && FEATURE_ASK[feature] && !pro ? el('div', { class: 'am-ask' }, `«${FEATURE_ASK[feature]}» входит в Про`) : null,
       el('ul', { class: 'pw-list' }, order.map((k) => { const [icn, t, d] = FEATURES[k]; return el('li', { class: k === feature ? 'hl' : '' },
         el('span', { class: 'pw-ic' }, ic(icn)), el('div', {}, el('b', {}, t), el('span', { class: 'pw-d' }, d))); })),
       el('div', { class: 'pw-price' },
