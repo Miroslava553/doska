@@ -32,7 +32,7 @@ fi
 /usr/local/bin/node -v
 
 say "3/7 Забираем Lodl с GitHub"
-git config --global --add safe.directory $APP/repo 2>/dev/null || true
+git config --system --get-all safe.directory 2>/dev/null | grep -qx $APP/repo || git config --system --add safe.directory $APP/repo
 id lodl >/dev/null 2>&1 || useradd --system --home $DATA --shell /usr/sbin/nologin lodl
 mkdir -p $APP $DATA $CONF
 if [ -d $APP/repo/.git ]; then git -C $APP/repo fetch -q origin && git -C $APP/repo reset -q --hard origin/main

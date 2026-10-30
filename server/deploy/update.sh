@@ -2,9 +2,12 @@
 # Обновление Lodl с GitHub: сайт обновляется сразу, сервер перезапускается, только если менялся его код.
 set -euo pipefail
 R=/opt/lodl/repo
+# таймер запускает скрипт без домашней папки, поэтому разрешение для git задаём прямо здесь (папка принадлежит lodl, а запускает root)
+export HOME=/root
+git config --system --get-all safe.directory 2>/dev/null | grep -qx "$R" || git config --system --add safe.directory "$R"
 cd $R
 OLD=$(git rev-parse HEAD)
-git fetch -q origin main || exit 0
+git fetch -q origin main || { echo 'Не получилось забрать обновление с GitHub'; exit 1; }
 NEW=$(git rev-parse origin/main)
 [ "$OLD" = "$NEW" ] && exit 0
 git reset -q --hard "$NEW"
