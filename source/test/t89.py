@@ -6,7 +6,7 @@ with sync_playwright() as p:
     for role in ('student', 'tutor'):
         pg = b.new_page(viewport={'width': 1300, 'height': 800}); errs = []; pg.on('pageerror', lambda e: errs.append(str(e)[:300]))
         pg.add_init_script("localStorage.setItem('doska:prefs', JSON.stringify({name:'Мира', role:'%s', roleFirst: 1, roleAt: 0, eraserPrecise: true}));" % role)
-        pg.goto('file:///home/claude/board/dist/site/index.html?nopeer#r=big%s-aaaa-bbbb' % role[0]); pg.wait_for_timeout(1500)
+        pg.goto('file:///home/claude/board/dist/doska.html?nopeer#r=big%s-aaaa-bbbb' % role[0]); pg.wait_for_timeout(1500)
         pg.evaluate("""() => { const D = window.__doska; const pid = D.S.page; const v = D.S.view; v.x = 0; v.y = 0; v.z = 1;
           D.doc.transact(() => { for (let i = 0; i < 2000; i++) { const ox = (i % 50) * 25, oy = Math.floor(i / 50) * 18; const pts = [];
             for (let j = 0; j < 30; j++) pts.push(Math.round((ox + j * 0.7) * 10), Math.round((oy + Math.sin(j / 3) * 5) * 10), 50);

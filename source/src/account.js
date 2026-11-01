@@ -48,11 +48,19 @@ export const onAccount = (f) => { listeners.add(f); return () => listeners.delet
 const emit = () => { for (const f of [...listeners]) { try { f(); } catch (e) { console.error(e); } } };
 window.addEventListener('storage', (e) => { if (e.key === 'doska:account') emit(); }); // вошли или оформили Про в другой вкладке
 export function account() { return ACCOUNTS ? LS.get('account', null) : null; }
-function saveAccount(a) { LS.set('account', a); emit(); }
+function saveAccount(a) { LS.set('account', a); emit(); trialTimer(); }
+// Подарок кончается в точное время: в эту минуту окно и кнопки сами переключаются на бесплатный тариф
+let trialT = 0;
+function trialTimer() {
+  clearTimeout(trialT);
+  const p = account()?.pro;
+  if (p && p.trial && p.until > Date.now()) trialT = setTimeout(() => { refreshAccount(); emit(); }, Math.min(p.until - Date.now() + 500, 2e9));
+}
+setTimeout(trialTimer, 0);
 // Ответ сервера переводим в тот же вид, что хранит тестовый режим, чтобы окна работали одинаково
 const fromServer = (me) => (!me || me.anon ? null : {
-  email: me.email, since: 0, used: me.used, quota: me.quota,
-  pro: me.pro ? { period: me.pro.period, until: me.pro.until, started: me.pro.started, canceled: me.pro.canceled, method: me.pro.method,
+  email: me.email, since: 0, used: me.used, quota: me.quota, gift: me.gift !== false,
+  pro: me.pro ? { trial: !!me.pro.trial, period: me.pro.period, until: me.pro.until, started: me.pro.started, canceled: me.pro.canceled, method: me.pro.method,
     active: me.pro.active, autopay: me.pro.autopay, nextPeriod: me.pro.nextPeriod, failing: me.pro.failing, price: me.pro.price, title: me.pro.title } : null,
 });
 const sameJson = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -71,6 +79,7 @@ export const proUntil = () => (isPro() ? (account()?.pro?.until || 0) : 0);
 export function isPro() {
   if (!ACCOUNTS) return true;
   const p = account()?.pro;
+  if (p && p.trial) return Date.now() < p.until; // подарок: ровно две недели, без запаса
   if (SERVER) return !!(p && p.active && Date.now() < p.until + 3 * DAY); // сервер считает и три дня на повтор списания
   return !!(p && (!p.canceled || Date.now() < p.until));
 }
@@ -276,12 +285,150 @@ const daysWord = (n) => { const a = n % 10, b = n % 100; return a === 1 && b !==
 
 export function requirePro(feature, f) { if (isPro()) return f(); openPro({ feature }); }
 
+// ---------- подарок: две недели Про ----------
+// Заголовок, первую фразу и кнопку написала Мира, их не менять без её согласия.
+const GIFT = {
+  title: 'Две недели Про бесплатно',
+  lead: 'Мы предоставляем каждому пользователю возможность опробовать Lodl Про на две недели, не требуя оплаты.',
+  button: 'Активировать Про на две недели',
+};
+const GIFT_DAYS = 14;
+const AFTER_TEXT = 'Создавать доски из шаблонов, заводить новые папки, загружать материалы, прятать ответы и смотреть историю доски можно будет с подпиской Про.';
+const hm = (t) => new Date(t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+const dayTime = (t) => `${day(t)} в ${hm(t)}`;
+const midnight = (t) => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); };
+// сколько календарных дней до конца подарка: 0 — сегодня, 1 — завтра
+const trialDays = (p) => Math.round((midnight(p.until) - midnight(Date.now())) / DAY);
+const endsText = (p) => { const k = trialDays(p); return k <= 0 ? `сегодня в ${hm(p.until)}` : k === 1 ? `завтра в ${hm(p.until)}` : `через ${k} ${daysWord(k)}`; };
+const onTrial = () => { const p = proInfo(); return !!(ACCOUNTS && p && p.trial && isPro()); };
+const trialSoon = () => onTrial() && trialDays(proInfo()) <= 7;
+export function giftAvailable() {
+  if (!ACCOUNTS || isPro()) return false;
+  const a = account();
+  return a ? a.gift !== false : !LS.get('giftUsed', 0);
+}
+// Подарок: сначала спокойное окно с объяснением, затем вход (если нужен) и включение.
+const GIFT_WHY = 'Нам важно, чтобы вы проверили Про на своих уроках и сами решили, нужен ли он вам. Поэтому включить эти две недели можно в любой удобный день, а платить за них не нужно.';
+// Включить подарок на сервере (или понарошку в тестовом файле). btn — кнопка, которая ждёт ответа.
+async function activateGift(btn, err, close) {
+  const label = btn ? btn.textContent : '';
+  if (btn) { if (btn.disabled) return; btn.disabled = true; btn.classList.add('loading'); btn.textContent = ''; btn.append(el('span', { class: 'am-spin' })); }
+  if (err) err.textContent = '';
+  const undo = () => { if (btn) { btn.disabled = false; btn.classList.remove('loading'); btn.textContent = label; } };
+  if (SERVER) {
+    try { saveAccount(fromServer(await api('POST', '/gift'))); }
+    catch (e) {
+      undo();
+      if (e.status === 401) { close?.(); openLogin({ reason: 'Войдите ещё раз, чтобы включить две недели Про.', then: afterGiftLogin }); return; }
+      if (e.status === 409) { await refreshAccount(); close?.(); if (isPro()) manageSub(); else giftUsedSheet(); return; }
+      if (err) err.textContent = e.message; else { close?.(); giftUsedSheet(e.message); }
+      return;
+    }
+  } else {
+    const a = account(); if (!a) { close?.(); return; }
+    a.pro = { trial: true, active: true, period: null, started: Date.now(), until: Date.now() + GIFT_DAYS * DAY, canceled: true };
+    a.gift = false; saveAccount(a);
+  }
+  LS.set('giftUsed', 1);
+  close?.(); celebrate({ gift: true });
+}
+// после входа сразу включаем: человек уже нажал «Активировать» в окне подарка
+async function afterGiftLogin() {
+  await refreshAccount();
+  if (isPro()) { manageSub(); return; }
+  if (account()?.gift === false) { giftUsedSheet(); return; }
+  activateGift(null, null, null);
+}
+function giftUsedSheet(msg) {
+  const card = el('div', { class: 'am-card am-confirm' });
+  const s = sheet(card);
+  put(card, xBtn(s.close),
+    el('div', { class: 'am-ico-circle' }, ic('sparkle')),
+    el('h2', { class: 'am-h' }, msg ? 'Не получилось включить Про' : 'Две недели Про уже были включены'),
+    el('p', { class: 'am-sub' }, msg || `Для адреса ${account()?.email || ''} бесплатные две недели уже были включены раньше, второй раз их включить нельзя. Подписку Про можно оформить в любой момент.`),
+    el('div', { class: 'am-btns' }, el('button', { class: 'am-btn ghost', onclick: () => s.close() }, 'Закрыть'), el('button', { class: 'am-btn pro', onclick: () => { s.close(); openPro(); } }, 'Оформить Про')));
+}
+export function openGift() {
+  if (isPro()) { manageSub(); return; }
+  if (account()?.gift === false) { giftUsedSheet(); return; }
+  const card = el('div', { class: 'am-card am-gift' });
+  const s = sheet(card);
+  const err = el('div', { class: 'am-err' });
+  const end = Date.now() + GIFT_DAYS * DAY;
+  const ok = el('button', { class: 'am-btn pro', onclick: () => {
+    if (!account()) { s.close(); openLogin({ reason: 'Две недели Про привязываются к почте. Так Про будет работать на всех ваших устройствах.', then: afterGiftLogin }); return; }
+    activateGift(ok, err, s.close);
+  } }, GIFT.button);
+  const feats = ['templates', 'answer', 'history', 'materials', 'folders'].map((k) => { const [icn, t] = FEATURES[k]; return el('li', {}, ic(icn), el('span', {}, k === 'materials' ? `Облако на ${PLAN.proMaterialsGB} ГБ` : t)); });
+  const row = (t) => el('li', {}, ic('check', 'ic gt-ic'), el('span', {}, t));
+  put(card, xBtn(s.close),
+    el('div', { class: 'gift-mark' }, ic('sparkle')),
+    el('h2', { class: 'am-h' }, GIFT.title),
+    el('p', { class: 'gift-why' }, GIFT_WHY),
+    el('div', { class: 'gift-sec' }, 'Что откроется'),
+    el('ul', { class: 'gift-feats' }, feats),
+    el('div', { class: 'gift-sec' }, 'Условия'),
+    el('ul', { class: 'gift-terms' },
+      row(`Включить их можно один раз. Если сделать это сейчас, Про будет действовать до ${dayTime(end)}.`),
+      row('Карту привязывать не нужно, поэтому никаких списаний не будет. За три дня до конца мы напомним письмом.')),
+    el('details', { class: 'gift-after' }, el('summary', {}, 'Что будет после двух недель'),
+      el('p', {}, `Доски, папки, материалы и шаблоны останутся у вас, и доски будут открываться как прежде. ${AFTER_TEXT}`)),
+    err, ok,
+    el('button', { class: 'am-link gift-later', onclick: () => s.close() }, 'Позже'),
+    testNote('Тестовый режим. Письма не приходят.'));
+}
+// строка подарка: на главной, в окне Про и в разделе подписки
+function giftRow(onclick) {
+  return el('button', { class: 'gift-row', onclick },
+    el('span', { class: 'gift-ic', 'aria-hidden': 'true' }, ic('sparkle')),
+    el('span', { class: 'gift-txt' }, el('b', {}, 'Две недели бесплатно, без привязки карты')), // строка стоит в окне Про, поэтому слово «Про» не повторяем
+    el('span', { class: 'gift-more', title: 'Подробнее' }, ic('right')));
+}
+// Карточка подарка на главной, а в последние семь дней подарка вместо неё напоминание
+export function homePromo() {
+  const box = el('div', { class: 'promo-slot' });
+  const paint = () => {
+    if (!box.isConnected && box._painted) { off(); clearInterval(tick); return; }
+    box._painted = true; box.innerHTML = '';
+    // о бесплатных двух неделях на главной говорит только точка на кнопке «Про», а здесь — напоминание в последние дни
+    if (trialSoon()) {
+      const p = proInfo();
+      box.append(el('div', { class: 'trial-card' },
+        el('div', { class: 'trial-h' }, el('span', { class: 'trial-ic' }, ic('history')), `Lodl Про закончится ${endsText(p)}`),
+        el('p', { class: 'trial-t' }, `Доски, папки, материалы и шаблоны останутся у вас. ${AFTER_TEXT}`),
+        el('button', { class: 'am-btn pro trial-go', onclick: () => openPro() }, 'Оформить Про')));
+    }
+    box.hidden = !box.childNodes.length;
+  };
+  const off = onAccount(paint);
+  const tick = setInterval(paint, 60000);
+  paint();
+  return box;
+}
+// Напоминание на доске при каждом открытии, когда до конца подарка семь дней и меньше. Видно только владельцу подарка.
+export function trialNag() {
+  if (!trialSoon()) return null;
+  const p = proInfo();
+  const n = el('div', { class: 'trial-nag', role: 'status' },
+    el('span', { class: 'trial-ic' }, ic('history')),
+    el('span', { class: 'tn-t' }, `Lodl Про закончится ${endsText(p)}`),
+    el('button', { class: 'tn-go', onclick: () => { hide(); openPro(); } }, 'Оформить', el('span', { class: 'tn-long' }, ' Про')),
+    el('button', { class: 'tn-x', title: 'Скрыть', 'aria-label': 'Скрыть', onclick: () => hide() }, '×'));
+  let tm = 0;
+  const hide = () => { clearTimeout(tm); n.classList.add('out'); setTimeout(() => n.remove(), 300); };
+  n.addEventListener('pointerenter', () => clearTimeout(tm));
+  n.addEventListener('pointerleave', () => { tm = setTimeout(hide, 4000); });
+  tm = setTimeout(hide, 9000);
+  return n;
+}
+
 export function openPro({ feature = '' } = {}) {
+  if (giftAvailable() && !LS.get('giftSeen', 0)) { LS.set('giftSeen', 1); emit(); } // точку на кнопке «Про» видели, убираем
   let period = LS.get('proPeriod', 'month');
   const card = el('div', { class: 'am-card am-pro' });
   const s = sheet(card);
   const paint = () => {
-    const pro = ACCOUNTS && isPro(), p = proInfo();
+    const p = proInfo(), trial = onTrial(), pro = ACCOUNTS && isPro() && !trial, gift = giftAvailable();
     const price = PLAN.price[period];
     const seg = el('div', { class: 'am-seg' },
       el('button', { class: 'am-seg-b' + (period === 'month' ? ' on' : ''), onclick: () => { period = 'month'; LS.set('proPeriod', period); paint(); } }, 'Месяц'),
@@ -293,12 +440,13 @@ export function openPro({ feature = '' } = {}) {
     };
     const cta = pro
       ? el('button', { class: 'am-btn pro big', onclick: () => { s.close(); manageSub(); } }, 'Подписка и оплата')
-      : el('button', { class: 'am-btn pro big', onclick: buy }, `${p ? 'Возобновить' : 'Оформить'} Про за ${rub(price)}`);
+      : el('button', { class: 'am-btn big pro', onclick: buy }, `${p && !p.trial ? 'Возобновить' : 'Оформить'} Про за ${rub(price)}`);
     const order = feature && FEATURES[feature] ? [feature, ...Object.keys(FEATURES).filter((k) => k !== feature)] : Object.keys(FEATURES);
     const raising = !pro && Date.now() < raiseAt();
     card.innerHTML = '';
     put(card, xBtn(s.close),
       el('div', { class: 'pw-top' }, proMark('md'), el('div', {}, el('h2', { class: 'pw-title' }, 'Lodl Про'), el('div', { class: 'pw-for' }, 'Подписка для репетиторов'))),
+      gift ? giftRow(() => { s.close(); openGift(); }) : null,
       raising ? el('div', { class: 'pw-raise' },
         el('div', { class: 'pw-raise-h' }, `С ${day(raiseAt())} Про будет стоить ${rub(PLAN.raise.month)} в месяц`),
         el('div', { class: 'pw-raise-t' }, `Если вы оформите подписку до этой даты, для вас цена останется ${rub(PLAN.price.month)}, пока подписка действует. До повышения осталось ${daysLeft()} ${daysWord(daysLeft())}.`)) : null,
@@ -309,6 +457,7 @@ export function openPro({ feature = '' } = {}) {
         el('div', { class: 'pw-num' }, el('span', {}, rub(price)), el('span', { class: 'pw-per' }, per(period))),
         el('div', { class: 'pw-note' }, period === 'year' ? `Около ${rub(Math.round(price / 12))} в месяц` : 'При оплате за год два месяца бесплатно'),
         cta,
+        trial ? el('div', { class: 'pw-note' }, `Бесплатные две недели действуют до ${dayTime(p.until)}. Оплаченный срок начнётся после них.`) : null,
         el('div', { class: 'pw-guarantee' }, ic('check', 'ic g-ic'), el('span', {}, 'Отменить подписку можно в любой момент.'))),
       el('details', { class: 'am-terms' }, el('summary', {}, 'Условия подписки'), termsList(period)),
       testNote('Тестовый режим. Оплата понарошку, деньги не списываются.'));
@@ -405,7 +554,7 @@ function openCheckout(period = 'month') {
 }
 
 // ---------- праздник после оплаты ----------
-export function celebrate() {
+export function celebrate({ gift = false } = {}) {
   const p = proInfo();
   const card = el('div', { class: 'am-card am-celebrate' });
   const s = sheet(card, { dark: true });
@@ -414,10 +563,11 @@ export function celebrate() {
     el('div', { class: 'cel-badge' }, el('div', { class: 'cel-ring' }), el('div', { class: 'cel-ring r2' }), proMark('xl')),
     el('div', { class: 'cel-kicker' }, 'Добро пожаловать'),
     el('h2', { class: 'cel-h' }, 'Теперь у вас ', el('span', { class: 'cel-pro' }, 'Про')),
-    el('p', { class: 'am-sub' }, 'Спасибо, что поддерживаете Lodl.'),
+    el('p', { class: 'am-sub' }, gift && p ? `Две недели Про действуют до ${dayTime(p.until)}.` : 'Спасибо, что поддерживаете Lodl.'),
     el('ul', { class: 'cel-list' }, items.map(([icn, t], i) => el('li', { style: `--d:${0.55 + i * 0.12}s` }, el('span', { class: 'pw-ic' }, ic(icn)), el('b', {}, t), el('span', { class: 'cel-check' }, ic('check'))))),
     el('button', { class: 'am-btn pro big', onclick: () => s.close() }, 'Начать'),
-    p ? el('p', { class: 'am-fine' }, SERVER && !p.autopay ? `Подписка действует до ${day(p.until)}` : `Следующее списание ${day(p.until)}`) : null);
+    gift ? el('p', { class: 'am-fine' }, 'Через две недели Про выключится сам, оплата не списывается.')
+      : p ? el('p', { class: 'am-fine' }, SERVER && !p.autopay ? `Подписка действует до ${day(p.until)}` : `Следующее списание ${day(p.until)}`) : null);
   if (!reduced()) { confetti(); setTimeout(() => s.back.isConnected && confetti(0.5), 650); }
   return s;
 }
@@ -478,8 +628,20 @@ export function manageSub() {
     card.innerHTML = '';
     put(card, xBtn(s.close), el('h2', { class: 'am-h left' }, 'Подписка и оплата'));
     if (!pro) {
-      put(card, el('div', { class: 'sub-card free' }, el('div', { class: 'sub-plan' }, 'Базовый'), el('div', { class: 'sub-meta' }, p && p.until ? `Про закончился ${day(p.until)}. Доски и материалы остались у вас.` : 'Бесплатно, навсегда')),
-        el('button', { class: 'am-btn pro', onclick: () => { s.close(); openPro(); } }, p && p.until ? 'Оформить Про снова' : 'Перейти на Про'));
+      put(card, el('div', { class: 'sub-card free' }, el('div', { class: 'sub-plan' }, 'Базовый'), el('div', { class: 'sub-meta' }, p && p.until ? `${p.trial ? 'Бесплатные две недели закончились' : 'Про закончился'} ${day(p.until)}. Доски и материалы остались у вас.` : 'Бесплатно, навсегда')),
+        giftAvailable() ? giftRow(() => { s.close(); openGift(); }) : null,
+        el('button', { class: 'am-btn pro', onclick: () => { s.close(); openPro(); } }, p && p.until && !p.trial ? 'Оформить Про снова' : 'Перейти на Про'));
+      return;
+    }
+    if (p.trial) {
+      const k = trialDays(p);
+      put(card,
+        el('div', { class: 'sub-card' },
+          el('div', { class: 'sub-top' }, proMark('sm'), el('div', { class: 'sub-plan' }, 'Lodl Про'), el('span', { class: 'sub-state gift' }, 'Бесплатно')),
+          el('div', { class: 'sub-price' }, k <= 0 ? `До ${hm(p.until)} сегодня` : `Ещё ${k} ${daysWord(k)}`),
+          el('div', { class: 'sub-meta' }, `Две недели Про действуют до ${dayTime(p.until)}. После этого доски, папки, материалы и шаблоны останутся у вас, а списаний не будет.`)),
+        el('div', { class: 'sub-rows' }, el('div', { class: 'sub-row' }, el('span', {}, 'Аккаунт'), el('span', {}, account().email))),
+        el('button', { class: 'am-btn pro', onclick: () => { s.close(); openPro(); } }, 'Оформить Про'));
       return;
     }
     const price = p.price || PLAN.price[p.nextPeriod || p.period];
@@ -542,9 +704,10 @@ function confirmCancel(after) {
 // ЮKassa возвращает на сайт с ?pay=метка. Узнаём у сервера, чем кончилась оплата, и показываем результат.
 function payReturn() {
   const sp = new URLSearchParams(location.search);
-  const id = sp.get('pay'), sub = sp.get('sub');
-  if (!id && !sub) return;
+  const id = sp.get('pay'), sub = sp.get('sub'), pro = sp.get('pro');
+  if (!id && !sub && !pro) return;
   history.replaceState(null, '', location.pathname + (LS.get('payFrom', '') || location.hash)); LS.set('payFrom', null);
+  if (pro) { refreshAccount().then(() => openPro()); return; }
   if (sub) { refreshAccount().then((a) => (a ? manageSub() : openLogin({ reason: 'Войдите, чтобы открыть подписку и оплату.', then: () => manageSub() }))); return; }
   if (!/^[A-Za-z0-9_-]{8,64}$/.test(id)) return;
   const card = el('div', { class: 'am-card am-confirm' });
@@ -588,13 +751,19 @@ export function accountControls() {
     wrap._painted = true;
     wrap.innerHTML = '';
     const a = account();
-    wrap.append(isPro()
+    const tp = onTrial() ? proInfo() : null, tk = tp ? trialDays(tp) : 0;
+    wrap.append(tp
+      ? el('button', { class: 'pro-pill on trial' + (tk <= 7 ? ' soon' : ''), title: `Бесплатные две недели действуют до ${dayTime(tp.until)}`, onclick: () => manageSub() }, ic('sparkle'),
+        el('span', { class: 'pp-long' }, tk <= 0 ? `Про до ${hm(tp.until)}` : `Про ещё ${tk} ${daysWord(tk)}`), el('span', { class: 'pp-short' }, tk <= 0 ? hm(tp.until) : `${tk} ${daysWord(tk)}`))
+      : isPro()
       ? el('button', { class: 'pro-pill on', onclick: () => manageSub() }, ic('sparkle'), el('span', { class: 'pp-long' }, 'Подписка и оплата'), el('span', { class: 'pp-short' }, 'Подписка'))
-      : el('button', { class: 'pro-pill', onclick: () => openPro() }, ic('sparkle'), 'Про'));
+      : el('button', { class: 'pro-pill', onclick: () => openPro(), title: giftAvailable() ? 'Две недели Про бесплатно, без привязки карты' : null }, ic('sparkle'), 'Про',
+        giftAvailable() && !LS.get('giftSeen', 0) ? el('span', { class: 'pp-dot', 'aria-label': 'Новое' }) : null));
     if (!a) wrap.append(el('button', { class: 'acc-login', onclick: () => openLogin() }, 'Войти'));
     else { const b = el('button', { class: 'acc-btn', title: a.email, onclick: () => accountMenu(b) }, avatar(a)); wrap.append(b); }
   };
   const off = onAccount(paint);
+  const t = setInterval(() => { if (!wrap.isConnected) clearInterval(t); else if (onTrial()) paint(); }, 60000);
   paint();
   return wrap;
 }
@@ -608,7 +777,7 @@ function accountMenu(anchor) {
   const m = el('div', { class: 'acc-menu' },
     el('div', { class: 'acc-head' }, avatar(a, 'lg'), el('div', { class: 'acc-who' }, el('b', {}, a.email.split('@')[0]), el('span', {}, a.email))),
     el('div', { class: 'acc-plan' + (pro ? ' pro' : '') },
-      pro ? [proMark('sm'), el('div', {}, el('b', {}, 'Про'), el('span', {}, p.canceled ? `до ${day(p.until)}` : `продлится ${day(p.until)}`))]
+      pro ? [proMark('sm'), el('div', {}, el('b', {}, 'Про'), el('span', {}, p.trial ? `бесплатно до ${day(p.until)}` : p.canceled ? `до ${day(p.until)}` : `продлится ${day(p.until)}`))]
         : [el('div', {}, el('b', {}, 'Базовый'), el('span', {}, 'бесплатный тариф')), el('button', { class: 'am-btn pro small', onclick: () => { close(); openPro(); } }, 'Про')]),
     item('card', 'Подписка и оплата', manageSub),
     item('exit', 'Выйти', logout),

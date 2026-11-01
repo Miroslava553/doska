@@ -55,6 +55,13 @@ const T = {
 };
 T.feedback = (d) => ({ subject: `Lodl: ${d.kind.toLowerCase()} от пользователя`, title: `${d.kind} от пользователя`, pre: d.text.slice(0, 80),
   blocks: [{ text: d.text }, { muted: `Почта для ответа: ${d.contact}` }, { muted: d.info }] });
+const AFTER = 'Создавать доски из шаблонов, заводить новые папки, загружать материалы, прятать ответы и смотреть историю доски можно будет с подпиской Про. Она стоит 199 ₽ в месяц или 1 990 ₽ в год.';
+T.giftSoon = (d) => ({ subject: `Две недели Lodl Про закончатся ${d.date}`, title: 'Две недели Про скоро закончатся', pre: `Две недели Про закончатся ${d.date}.`,
+  blocks: [{ text: `Две недели Lodl Про, которые вы включили, закончатся ${d.date}. Доски, папки, материалы и шаблоны останутся у вас и будут открываться как прежде.` },
+    { text: AFTER }, { button: 'Оформить Про', href: d.site + '/?pro=1' }, { muted: 'Про выключится сам, оплата не списывается.' }] });
+T.giftEnd = (d) => ({ subject: 'Две недели Lodl Про закончились', title: 'Две недели Про закончились', pre: 'Всё, что вы создали, осталось у вас.',
+  blocks: [{ text: 'Две недели Lodl Про закончились. Всё, что вы создали за это время, осталось у вас, и доски открываются как прежде.' },
+    { text: AFTER }, { button: 'Оформить Про', href: d.site + '/?pro=1' }] });
 const textOf = (m) => [m.title, '', ...m.blocks.map((b) => b.code || b.text || b.muted || (b.button ? `${b.button}: ${b.href}` : '')).filter(Boolean)].join('\n\n');
 
 async function send(to, kind, data) {

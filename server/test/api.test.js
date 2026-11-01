@@ -20,7 +20,7 @@ function client() {
   c.cookie = () => cookie; return c;
 }
 const lastCode = (email) => { const m = [...mails].reverse().find((x) => x.includes(email) && /Код для входа/.test(x)); return m && m.match(/(\d{6})/)[1]; };
-async function login(c, email) { await c('POST', '/api/login/start', { email }); return c('POST', '/api/login/verify', { email, code: lastCode(email) }); }
+async function login(c, email) { await c('POST', '/api/login/start', { email }); return c('POST', '/api/login/verify', { email, code: lastCode(email.trim().toLowerCase()) }); }
 
 (async () => {
   await new Promise((r) => yk.server.listen(4010, r)); await new Promise((r) => server.listen(4011, '127.0.0.1', r));
@@ -129,6 +129,55 @@ async function login(c, email) { await c('POST', '/api/login/start', { email });
   ok('выход', (await a('POST', '/api/logout')).s === 200 && (await a('GET', '/api/me')).d.anon);
   db.prepare('UPDATE codes SET sent = 0').run(); await login(a, 'mira@mail.ru'); ok('удаление аккаунта', (await a('POST', '/api/account/delete')).s === 200);
   ok('после удаления данных нет', !db.prepare('SELECT 1 FROM subs WHERE user = ?').get(uid) && !db.prepare('SELECT 1 FROM kv WHERE user = ?').get(uid));
+  // подарок: две недели Про
+  const g = client(), h = client(), o = client();
+  me = (await login(g, 'gift@mail.ru')).d;
+  ok('подарок доступен новому', me.gift === true && !me.pro);
+  me = (await g('POST', '/api/gift')).d;
+  const gUntil = me.pro && me.pro.until;
+  ok('подарок включён на 14 дней', me.pro.active && me.pro.trial && Math.abs(gUntil - Date.now() - 14 * 86400e3) < 60e3 && me.gift === false && !me.pro.autopay);
+  ok('второй раз подарок не включить', (await g('POST', '/api/gift')).s === 409);
+  ok('с подарком файлы в Материалы загружаются', (await g('PUT', '/api/blob/g1', new Uint8Array([5, 6]), { 'content-type': 'image/png' })).s === 200);
+  ok('с подарком шаблон сохраняется', (await g('PUT', '/api/kv/tpls/gt1', { name: 'урок' })).s === 200);
+  ok('подарок нельзя «возобновить» в подписку', (await g('POST', '/api/sub/resume')).s === 409 && (await g('POST', '/api/sub/period', { period: 'year' })).s === 409);
+  const gid = db.prepare("SELECT id FROM users WHERE email = 'gift@mail.ru'").get().id;
+  db.prepare('UPDATE subs SET until = ? WHERE user = ?').run(Date.now() + 2 * 86400e3, gid);
+  let nm = mails.length; await renewTick(); await renewTick();
+  ok('письмо за три дня до конца подарка, один раз', mails.slice(nm).filter((m) => m.includes('gift@mail.ru') && m.includes('Две недели Lodl Про закончатся')).length === 1);
+  r = await g('POST', '/api/pay', { period: 'month' }); ok('во время подарка можно оформить Про', r.s === 200);
+  const gp = r.d.url.split('/').pop(); yk.finish(gp, true); await anon('POST', '/api/yk/hook', { object: { id: gp } });
+  me = (await g('GET', '/api/me')).d;
+  const gu2 = db.prepare('SELECT until FROM subs WHERE user = ?').get(gid).until;
+  ok('оплата после подарка: месяц добавлен к концу подарка, подарок закончен', me.pro.active && !me.pro.trial && me.pro.until > gu2 - 1000 && me.pro.until > Date.now() + 25 * 86400e3 && me.pro.period === 'month');
+  db.prepare('UPDATE subs SET until = ? WHERE user = ?').run(Date.now() + 40 * 86400e3, gid);
+  nm = mails.length; await renewTick(); ok('после оплаты писем о подарке нет', !mails.slice(nm).some((m) => m.includes('gift@mail.ru') && /Две недели/.test(m)));
+  // подарок закончился сам
+  await login(h, 'gift2@mail.ru'); await h('POST', '/api/gift');
+  const hid = db.prepare("SELECT id FROM users WHERE email = 'gift2@mail.ru'").get().id;
+  await h('PUT', '/api/blob/h1', new Uint8Array([7]), { 'content-type': 'image/png' });
+  db.prepare('UPDATE subs SET until = ? WHERE user = ?').run(Date.now() - 1000, hid);
+  nm = mails.length; let np = yk.log.length; await renewTick();
+  me = (await h('GET', '/api/me')).d;
+  ok('подарок закончился: Про выключен, без списаний', !me.pro.active && yk.log.length === np);
+  ok('письмо об окончании подарка (и без письма «за три дня»)', mails.slice(nm).filter((m) => m.includes('gift2@mail.ru') && m.includes('Две недели Lodl Про закончились')).length === 1 && !mails.slice(nm).some((m) => m.includes('gift2@mail.ru') && m.includes('закончатся')));
+  ok('после подарка новое не загрузить, старое открывается', (await h('PUT', '/api/blob/h2', new Uint8Array([1]))).s === 402 && (await h('GET', '/api/blob/h1')).s === 200);
+  await renewTick(); ok('письмо об окончании не повторяется', mails.filter((m) => m.includes('gift2@mail.ru') && m.includes('закончились')).length === 1);
+  ok('после подарка можно оформить Про', (await h('POST', '/api/pay', { period: 'month' })).s === 200);
+  // удалил аккаунт и вошёл снова: подарок второй раз не получить
+  ok('удаление аккаунта с подарком', (await h('POST', '/api/account/delete')).s === 200);
+  db.prepare('UPDATE codes SET sent = 0').run(); me = (await login(h, 'Gift2@Mail.ru')).d;
+  ok('после удаления и нового входа подарка нет', me.gift === false && (await h('POST', '/api/gift')).s === 409);
+  ok('почта в таблице подарков не хранится', !JSON.stringify(db.prepare('SELECT * FROM gifts').all()).includes('@'));
+  // бывший подписчик с сохранённой картой: после подарка карта не списывается
+  await login(o, 'old@mail.ru'); r = await o('POST', '/api/pay', { period: 'month' }); const op = r.d.url.split('/').pop(); yk.finish(op, true); await anon('POST', '/api/yk/hook', { object: { id: op } });
+  const oid = db.prepare("SELECT id FROM users WHERE email = 'old@mail.ru'").get().id;
+  ok('подписчику с действующим Про подарок не включить', (await o('POST', '/api/gift')).s === 409);
+  await o('POST', '/api/sub/cancel'); db.prepare('UPDATE subs SET until = ? WHERE user = ?').run(Date.now() - 1000, oid); await renewTick();
+  me = (await o('POST', '/api/gift')).d; ok('после окончания подписки подарок включается', me.pro && me.pro.active && me.pro.trial && !me.pro.canceled === false);
+  ok('цена подарка не тянет старую цену', db.prepare('SELECT price_month FROM subs WHERE user = ?').get(oid).price_month === null);
+  db.prepare('UPDATE subs SET until = ? WHERE user = ?').run(Date.now() - 1000, oid); np = yk.log.length; await renewTick();
+  ok('после подарка старая карта не списывается', yk.log.length === np && !(await o('GET', '/api/me')).d.pro.active);
+  ok('аноним подарок не включит', (await anon('POST', '/api/gift')).s === 401);
   ol(fails ? `ОШИБОК: ${fails}` : 'ВСЁ ВЕРНО');
   server.close(); yk.server.close(); fs.rmSync(dir, { recursive: true, force: true }); process.exit(fails ? 1 : 0);
 })().catch((e) => { ol(e); process.exit(1); });

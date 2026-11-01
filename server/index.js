@@ -44,7 +44,11 @@ CREATE TABLE IF NOT EXISTS blobs (user INTEGER NOT NULL REFERENCES users(id) ON 
 CREATE TABLE IF NOT EXISTS boards (room TEXT PRIMARY KEY, state BLOB, size INTEGER, t INTEGER);
 CREATE INDEX IF NOT EXISTS pay_user ON payments(user);
 CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, t INTEGER, kind TEXT, text TEXT, contact TEXT, user INTEGER, info TEXT);
+-- подарок «две недели Про»: один раз на почту. Храним отпечаток адреса, а не сам адрес, и он остаётся после удаления аккаунта,
+-- чтобы подарок нельзя было получить снова. sent: 0 писем не было, 1 письмо за три дня, 2 письмо об окончании
+CREATE TABLE IF NOT EXISTS gifts (mail TEXT PRIMARY KEY, user INTEGER, t INTEGER, until INTEGER, sent INTEGER DEFAULT 0);
 `);
+try { db.exec('ALTER TABLE subs ADD COLUMN trial INTEGER DEFAULT 0'); } catch {} // 1: Про включён подарком
 const q = (sql) => { const st = db.prepare(sql); return { get: (...a) => st.get(...a), all: (...a) => st.all(...a), run: (...a) => st.run(...a) }; };
 const tx = (f) => { db.exec('BEGIN IMMEDIATE'); try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
 
@@ -74,6 +78,9 @@ function proActive(s, t = now()) {
   if (t < s.until) return true;
   return !s.canceled && !!s.pm_id && AUTOPAY && s.fails < 3 && t < s.until + GRACE;
 }
+const GIFT_DAYS = 14;
+const mailKey = (email) => sha('gift:' + String(email).trim().toLowerCase());
+const giftOf = (email) => q('SELECT * FROM gifts WHERE mail = ?').get(mailKey(email)) || null;
 function priceOf(s, period) { return (s && (period === 'year' ? s.price_year : s.price_month)) || PRICE[period]; }
 function meJson(user) {
   const u = q('SELECT id, email FROM users WHERE id = ?').get(user); if (!u) return null;
@@ -81,8 +88,9 @@ function meJson(user) {
   const used = q('SELECT COALESCE(SUM(size),0) AS n FROM blobs WHERE user = ?').get(user).n + q("SELECT COALESCE(SUM(size),0) AS n FROM kv WHERE user = ? AND coll IN ('files','tpls')").get(user).n;
   return {
     email: u.email, used, quota: QUOTA,
+    gift: !giftOf(u.email),
     pro: s && s.until ? {
-      active, period: s.period, until: s.until, canceled: !!s.canceled, autopay: AUTOPAY && !!s.pm_id,
+      active, trial: !!s.trial, period: s.period, until: s.until, canceled: !!s.canceled, autopay: AUTOPAY && !!s.pm_id && !s.trial,
       method: s.pm_type === 'sbp' ? 'sbp' : 'card', title: s.pm_title || '', nextPeriod: s.next_period || null,
       price: priceOf(s, s.next_period || s.period), failing: !!s.fails, started: s.started,
     } : null,
@@ -138,7 +146,7 @@ function applyPayment(p) {
         q(`INSERT INTO subs (user, period, until, canceled, pm_id, pm_title, pm_type, price_month, price_year, next_period, fails, next_try, reminded, started)
            VALUES (?,?,?,0,?,?,?,?,?,NULL,0,NULL,NULL,?)
            ON CONFLICT(user) DO UPDATE SET period=excluded.period, until=excluded.until, canceled=0, pm_id=COALESCE(excluded.pm_id, subs.pm_id), pm_title=CASE WHEN excluded.pm_id IS NULL THEN subs.pm_title ELSE excluded.pm_title END,
-           pm_type=CASE WHEN excluded.pm_id IS NULL THEN subs.pm_type ELSE excluded.pm_type END, price_month=excluded.price_month, price_year=excluded.price_year, next_period=NULL, fails=0, next_try=NULL, reminded=NULL`)
+           pm_type=CASE WHEN excluded.pm_id IS NULL THEN subs.pm_type ELSE excluded.pm_type END, price_month=excluded.price_month, price_year=excluded.price_year, next_period=NULL, fails=0, next_try=NULL, reminded=NULL, trial=0`)
           .run(row.user, row.period, addPeriod(base, row.period), saved, pmTitle, pm.type || '', pmonth, pyear, now());
       } else if (s) {
         const per = s.next_period || s.period;
@@ -164,7 +172,21 @@ function applyPayment(p) {
 async function refreshPayment(id) { const p = await yk('GET', '/payments/' + encodeURIComponent(id)); applyPayment(p); return p; }
 
 // Продление и напоминания: раз в пять минут
+// Письма о подарке: за три дня до конца и в день окончания. Если подарок сменился оплатой, писем нет.
+function giftTick() {
+  const rows = q('SELECT g.mail, g.sent, s.until, u.email FROM gifts g JOIN subs s ON s.user = g.user JOIN users u ON u.id = g.user WHERE s.trial = 1 AND g.sent < 2').all();
+  for (const r of rows) {
+    if (r.until <= now()) {
+      q('UPDATE gifts SET sent = 2 WHERE mail = ?').run(r.mail);
+      mail.send(r.email, 'giftEnd', { site: SITE }).catch((e) => log('mail', e.message));
+    } else if (r.sent < 1 && r.until - now() <= 3 * DAY) {
+      q('UPDATE gifts SET sent = 1 WHERE mail = ?').run(r.mail);
+      mail.send(r.email, 'giftSoon', { date: dayRu(r.until), site: SITE }).catch((e) => log('mail', e.message));
+    }
+  }
+}
 async function renewTick() {
+  giftTick();
   if (!AUTOPAY || !SHOP) return;
   const due = q(`SELECT * FROM subs WHERE canceled = 0 AND pm_id IS NOT NULL AND fails < 3 AND until <= ? AND (next_try IS NULL OR next_try <= ?)`).all(now() + 10 * MIN, now());
   for (const s of due) {
@@ -279,6 +301,7 @@ route('POST', /^\/api\/account\/delete$/, ({ user, res }) => {
   const s = subOf(user);
   for (const b of q('SELECT id FROM blobs WHERE user = ?').all(user)) fs.rm(blobPath(user, b.id), { force: true }, () => {});
   fs.rm(path.join(DATA, 'blobs', String(user)), { recursive: true, force: true }, () => {});
+  q('UPDATE gifts SET user = NULL WHERE user = ?').run(user); // отметка о подарке остаётся без связи с аккаунтом: номер аккаунта может достаться другому
   q('DELETE FROM users WHERE id = ?').run(user); // подписка, сессии и облако удаляются вместе с ним
   setCookie(res, '', 0); log('account deleted', user, s && proActive(s) ? '(с действующим Про)' : ''); return { ok: true };
 });
@@ -300,13 +323,29 @@ route('GET', /^\/api\/pay\/([A-Za-z0-9_-]{8,64})$/, async ({ user, m }) => {
 route('POST', /^\/api\/sub\/cancel$/, ({ user }) => { q('UPDATE subs SET canceled = 1 WHERE user = ?').run(user); return meJson(user); });
 route('POST', /^\/api\/sub\/resume$/, ({ user }) => {
   const s = subOf(user); if (!s || !proActive(s)) throw fail(409, 'Подписка уже закончилась, её можно оформить заново');
-  if (!s.pm_id) throw fail(409, 'Чтобы подписка продлевалась сама, оплатите её ещё раз');
+  if (!s.pm_id || s.trial) throw fail(409, 'Чтобы подписка продлевалась сама, оплатите её ещё раз');
   q('UPDATE subs SET canceled = 0, fails = 0, next_try = NULL WHERE user = ?').run(user); return meJson(user);
 });
 route('POST', /^\/api\/sub\/period$/, async ({ req, user }) => {
   const { period } = await json(req); const s = subOf(user);
-  if (!s || !proActive(s)) throw fail(409, 'Подписка не оформлена');
+  if (!s || !proActive(s) || s.trial) throw fail(409, 'Подписка не оформлена');
   q('UPDATE subs SET next_period = ? WHERE user = ?').run(period === 'year' && s.period !== 'year' ? 'year' : period === 'month' && s.period !== 'month' ? 'month' : null, user);
+  return meJson(user);
+});
+// Подарок: две недели Про без оплаты, один раз на почту, включается когда угодно
+route('POST', /^\/api\/gift$/, ({ user }) => {
+  const u = q('SELECT email FROM users WHERE id = ?').get(user);
+  if (giftOf(u.email)) throw fail(409, 'Две недели Про для этой почты уже были включены');
+  const s = subOf(user);
+  if (proActive(s)) throw fail(409, 'Про уже включён');
+  const until = now() + GIFT_DAYS * DAY;
+  tx(() => {
+    q('INSERT INTO gifts (mail, user, t, until, sent) VALUES (?,?,?,?,0)').run(mailKey(u.email), user, now(), until);
+    // старая карта не должна списаться после подарка: продление выключено, пока человек сам не оплатит
+    q(`INSERT INTO subs (user, period, until, canceled, trial, started) VALUES (?, NULL, ?, 1, 1, ?)
+       ON CONFLICT(user) DO UPDATE SET until=excluded.until, canceled=1, trial=1, next_period=NULL, fails=0, next_try=NULL, reminded=NULL, price_month=NULL, price_year=NULL, started=excluded.started`).run(user, until, now());
+  });
+  log('gift on', user);
   return meJson(user);
 });
 // Уведомления от ЮKassa. Телу не верим: статус всегда уточняем запросом в ЮKassa.
@@ -497,4 +536,4 @@ if (require.main === module) {
   const tick = () => renewTick().catch((e) => log('tick', e.stack || e));
   setTimeout(tick, 5000); setInterval(tick, 5 * MIN);
 }
-module.exports = { server, renewTick, db, addPeriod };
+module.exports = { server, renewTick, db, addPeriod, giftTick };

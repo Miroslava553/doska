@@ -4,6 +4,7 @@ import { Hub, ManualConnect } from './sync.js';
 import {
   decodePts, encodePts, strokeOptions, outlinePath, paintInk, localBox, worldBox, geomWorldBox, itemTransform, hitItem, distSeg,
   drawItem, drawBackground, setAsyncLoad, setShadePeek, fitShade, hwGeom, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf, rotCenter, bakeShape, SCALE_BAKED,
+  CUTTABLE, inCuts, scaleCuts, rotPt,
 } from './render.js';
 import { compileMany } from './expr.js';
 import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, solidEdges, regularSolid } from './solid.js';
@@ -13,7 +14,7 @@ import { ICONS } from './icons.js';
 import { releaseFor } from './changelog.js';
 import { FIGS, figIcon, figPrims } from './figs.js';
 import { SERVER, api, syncRecent, pushBoard, dropBoard, putBoardFolder, dropBoardFolder, boardSync } from './cloud.js';
-import { ACCOUNTS, account, isPro, openPro, openLogin, requirePro, proTag, accountControls, onAccount, inCloud, ownedBoards, PLAN } from './account.js';
+import { ACCOUNTS, account, isPro, openPro, openLogin, requirePro, proTag, accountControls, onAccount, inCloud, ownedBoards, PLAN, homePromo, trialNag } from './account.js';
 import { materialsPanel } from './materials.js';
 import { startReplay } from './replay.js';
 import { versionHistory, forgetHistory } from './history.js';
@@ -518,7 +519,7 @@ function showStart() {
   // условия, реквизиты и политика: их проверяет платёжный сервис, и они нужны покупателям
   const legal = el('div', { class: 'legal' }, el('a', { href: 'terms.html#prices', target: '_blank', rel: 'noopener' }, 'Lodl Про: 199 ₽ в месяц или 1 990 ₽ в год'), el('span', {}, '·'), el('a', { href: 'terms.html', target: '_blank', rel: 'noopener' }, 'Условия и реквизиты'), el('span', {}, '·'), el('a', { href: 'privacy.html', target: '_blank', rel: 'noopener' }, 'Политика конфиденциальности'));
   const fbk = feedbackCard();
-  document.body.append(el('div', { id: 'start', class: 'with-top' }, top, el('div', { class: 'home-row' }, el('div', { class: 'start-col' }, hint, card, legal), fbk)));
+  document.body.append(el('div', { id: 'start', class: 'with-top' }, top, el('div', { class: 'home-row' }, el('div', { class: 'start-col' }, hint, ACCOUNTS ? homePromo() : null, card, legal), fbk)));
   floatFeedback(fbk, card.parentElement);
 }
 // Карточку предложений можно перетащить куда угодно, кроме главного окна и верхней панели.
@@ -710,7 +711,7 @@ function startBoard(room) {
     }
     const onPage = added.filter((id) => items.get(id).page === S.page);
     const top = pageItems().slice(-onPage.length).map((it) => it.id);
-    const simple = !pvDrop && added.length === changed.size && !S.ov && !S.hidden.size && onPage.every((id) => top.includes(id));
+    const simple = !pvDrop && added.length === changed.size && !S.ov && !S.hidden.size && !S.cutPv && onPage.every((id) => top.includes(id));
     if (simple && !dirtyMain) { for (const id of added) if (items.get(id).page === S.page) pendingAppend.push(id); dirtyOver = true; if (!rafId) rafId = requestAnimationFrame(frame); }
     else invalidate();
   });
@@ -872,7 +873,7 @@ function startBoard(room) {
       const ov = rv.ovById?.get(it.id) || (S.ov && S.ov.copy ? null : S.ov);
       const b = worldBox(it, ov || S.ov);
       if (b[2] < vx0 || b[0] > vx1 || b[3] < vy0 || b[1] > vy1) continue;
-      drawItem(ctx, it, ov, v.z, S.pieces?.get(it.id) || rv.pieces?.get(it.id));
+      drawItem(ctx, it, ov, v.z, S.pieces?.get(it.id) || rv.pieces?.get(it.id), pvCuts(it, rv));
     }
     if (S.ov && S.ov.copy) { // копия под курсором, оригинал остаётся на месте
       ctx.globalAlpha = 0.75;
@@ -954,15 +955,10 @@ function startBoard(room) {
     if (!o.sel && !o.ov && !o.marq && !o.tmp && !o.hid && !o.er) { remotePv.delete(o.id); invalidate(); return; }
     const st = { page: o.page, sel: o.sel || null, marq: o.marq || null, tmp: o.tmp || null, hid: new Set(o.hid || []), at: Date.now(),
       ov: o.ov ? { ...o.ov, ids: new Set(o.ov.ids) } : null, er: null };
-    if (o.er && o.page === S.page) { // точный ластик: повторяем стирание по его точкам
-      let er = prev && prev.er && prev.er.sid === o.er.sid ? prev.er : { sid: o.er.sid, n: 0, st: { hidden: new Set(), pieces: new Map() } };
+    if (o.er && o.page === S.page) { // точный ластик: повторяем стирание по его точкам (вырезы и задетые объекты)
+      let er = prev && prev.er && prev.er.sid === o.er.sid ? prev.er : { sid: o.er.sid, n: 0, st: preciseState() };
       const P = o.er.pts;
-      for (let i = er.n; i < P.length; i++) {
-        const [x, y, r] = P[i];
-        if (i === 0) { eraseApply(er.st, x, y, r, true); continue; }
-        const [px, py] = P[i - 1]; const d = Math.hypot(x - px, y - py); const n = Math.max(1, Math.ceil(d / (r * 0.3)));
-        for (let k = 1; k <= n; k++) eraseApply(er.st, px + ((x - px) * k) / n, py + ((y - py) * k) / n, r, true);
-      }
+      for (let i = er.n; i < P.length; i++) { const [x, y, r] = P[i]; er.st.r = r; preciseStep(er.st, i ? P[i - 1] : P[i], P[i]); }
       er.n = P.length; st.er = er;
     }
     remotePv.set(o.id, st); invalidate();
@@ -971,14 +967,14 @@ function startBoard(room) {
   setInterval(() => { const now = Date.now(); let ch = false; for (const [k, v] of remotePv) if (now - v.at > 4000) { remotePv.delete(k); ch = true; } if (ch) invalidate(); }, 1000);
   // что из чужих действий касается рисования на этом листе
   function remoteView() {
-    let hidden = null, pieces = null, ovById = null;
+    let hidden = null, pieces = null, ovById = null, cuts = null;
     for (const v of remotePv.values()) {
       if (v.page !== S.page) continue;
       for (const id of v.hid) (hidden ||= new Set()).add(id);
-      if (v.er) { for (const id of v.er.st.hidden) (hidden ||= new Set()).add(id); for (const [id, pc] of v.er.st.pieces) (pieces ||= new Map()).set(id, pc); }
+      if (v.er) { for (const id of v.er.st.hidden) (hidden ||= new Set()).add(id); if (v.er.st.ids.size) (cuts ||= []).push(v.er.st); }
       if (v.ov && !v.ov.copy) for (const id of v.ov.ids) (ovById ||= new Map()).set(id, v.ov);
     }
-    return { hidden, pieces, ovById };
+    return { hidden, pieces, ovById, cuts };
   }
 
   // Где собеседник сейчас пишет: рамка его последней линии (обновляется, пока он пишет)
@@ -1450,7 +1446,7 @@ function startBoard(room) {
     const x = ov.ax + (it.x - ov.ax) * kx, y = ov.ay + (it.y - ov.ay) * ky;
     switch (it.type) {
       case 'text': case 'tex': return { x, y };
-      case 'stroke': return { x, y, pts: encodePts(decodePts(it).map(([px, py, pr]) => [px * kx, py * ky, pr]), it.q || 10) };
+      case 'stroke': return { x, y, pts: encodePts(decodePts(it).map(([px, py, pr]) => [px * kx, py * ky, pr]), it.q || 10), ...(it.cuts ? { cuts: scaleCuts(it.cuts, kx, ky) } : {}) };
       case 'line': case 'arrow': return { x, y, x1: it.x1 * kx, y1: it.y1 * ky, x2: it.x2 * kx, y2: it.y2 * ky };
       case 'poly': return { x, y, pts: it.pts.map(([px, py]) => [px * kx, py * ky]) };
       default: return { x, y, w: it.w * kx, h: it.h * ky };
@@ -1947,8 +1943,174 @@ function startBoard(room) {
     }
   
   }
+  // Ластик «целиком»: проверяем всю полосу, которую круг прошёл между двумя точками, а не отдельные касания.
+  // Расстояние от середины линии до пути центра ластика сравниваем с радиусом ластика плюс половиной толщины линии:
+  // линия исчезает ровно в тот миг, когда край её чернил касается края круга, при любой скорости.
+  function segDist2(ax, ay, bx, by, cx, cy, dx, dy) { // квадрат расстояния между отрезками AB и CD
+    const o = (px, py, qx, qy, rx, ry) => (qx - px) * (ry - py) - (qy - py) * (rx - px);
+    const d1 = o(cx, cy, dx, dy, ax, ay), d2 = o(cx, cy, dx, dy, bx, by), d3 = o(ax, ay, bx, by, cx, cy), d4 = o(ax, ay, bx, by, dx, dy);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) return 0;
+    const ps = (px, py, ux, uy, vx, vy) => { const wx = vx - ux, wy = vy - uy, L = wx * wx + wy * wy; let t = L > 1e-12 ? ((px - ux) * wx + (py - uy) * wy) / L : 0; t = t < 0 ? 0 : t > 1 ? 1 : t; const ex = ux + wx * t - px, ey = uy + wy * t - py; return ex * ex + ey * ey; };
+    return Math.min(ps(ax, ay, cx, cy, dx, dy), ps(bx, by, cx, cy, dx, dy), ps(cx, cy, ax, ay, bx, by), ps(dx, dy, ax, ay, bx, by));
+  }
+  function makeWholeEraser(raw = false) {
+    const cache = new Map();
+    const geom = (it) => {
+      let g = cache.get(it.id); if (g) return g;
+      if (it.type === 'stroke') {
+        const thin = it.kind === 'pen' ? (it.thin ?? 0.5) : 0;
+        const hw = (p) => it.size * Math.max(0.05, 0.5 - thin * (0.5 - (p ?? 1)));
+        g = { polys: [{ pts: decodePts(it), hw, max: it.size / 2 }] };
+      } else if (ERASABLE_SHAPES.has(it.type)) {
+        g = { polys: shapePolys(it).polys.map((pc) => ({ pts: pc.pts, hw: () => pc.w / 2, max: pc.w / 2 })), fill: !!(it.fill && (it.type === 'rect' || it.type === 'ellipse' || (it.type === 'poly' && it.closed))) };
+      } else g = { other: true };
+      g.box = localBox(it); g.max = g.polys ? Math.max(0, ...g.polys.map((pc) => pc.max)) : 0;
+      cache.set(it.id, g); return g;
+    };
+    const hitPoly = (pts, ax, ay, bx, by, lr, hw) => {
+      if (!pts.length) return false;
+      if (pts.length === 1) { const R = lr + hw(pts[0][2]); return segDist2(pts[0][0], pts[0][1], pts[0][0], pts[0][1], ax, ay, bx, by) <= R * R; }
+      for (let i = 1; i < pts.length; i++) {
+        const p = pts[i - 1], q = pts[i], R = lr + hw(((p[2] ?? 1) + (q[2] ?? 1)) / 2);
+        if (segDist2(p[0], p[1], q[0], q[1], ax, ay, bx, by) <= R * R) return true;
+      }
+      return false;
+    };
+    // a, b — точки центра ластика на доске; r — радиус; into — куда сложить задетые
+    return (a, b, r, into, skip) => {
+      for (const it of pageItems()) {
+        if (it.locked || into.has(it.id) || (skip && skip.has(it.id)) || it.type === 'image' || hiddenByShade(it)) continue;
+        const g = geom(it);
+        if (g.other && !raw && it.cuts && it.cuts.length) { // текст или формула с вырезом: касание только оставшейся части
+          const [qa0, qa1] = toItemLocal(it, a[0], a[1]), [qb0, qb1] = toItemLocal(it, b[0], b[1]), lr = r / (it.s || 1), R2 = lr * lr;
+          if (inkSamples(it).some((q) => segDist2(q[0], q[1], q[0], q[1], qa0, qa1, qb0, qb1) <= R2 && !inCuts(it.cuts, q[0], q[1]))) into.add(it.id);
+          continue;
+        }
+        if (g.other) { // текст, формулы и прочее: касания по пути через каждые полрадиуса
+          const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / (r * 0.5)));
+          for (let i = 0; i <= n; i++) if (hitItem(it, a[0] + ((b[0] - a[0]) * i) / n, a[1] + ((b[1] - a[1]) * i) / n, r)) { into.add(it.id); break; }
+          continue;
+        }
+        const s = it.s || 1, ax = (a[0] - it.x) / s, ay = (a[1] - it.y) / s, bx = (b[0] - it.x) / s, by = (b[1] - it.y) / s, lr = r / s, m = lr + g.max;
+        const bb = g.box;
+        if (Math.max(ax, bx) < bb[0] - m || Math.max(ay, by) < bb[1] - m || Math.min(ax, bx) > bb[2] + m || Math.min(ay, by) > bb[3] + m) continue;
+        if (!(g.polys.some((pc) => hitPoly(pc.pts, ax, ay, bx, by, lr, pc.hw)) || (g.fill && (hitItem(it, a[0], a[1], 0) || hitItem(it, b[0], b[1], 0))))) continue;
+        // у объекта есть стёртые места: считается касание только оставшихся чернил
+        if (!raw && it.cuts && it.cuts.length) {
+          const [qa0, qa1] = toItemLocal(it, a[0], a[1]), [qb0, qb1] = toItemLocal(it, b[0], b[1]), R2 = lr * lr;
+          if (!inkSamples(it).some((q) => segDist2(q[0], q[1], q[0], q[1], qa0, qa1, qb0, qb1) <= R2 && !inCuts(it.cuts, q[0], q[1]))) continue;
+        }
+        into.add(it.id);
+      }
+    };
+  }
+  // ---------- точный ластик ----------
+  // Стирает ровно то, что попало под круг: к линии или фигуре добавляется «вырез» — путь центра ластика с его радиусом
+  // (в координатах самого объекта). Толстая линия, задетая краем, теряет только этот край.
+  const contentBox = (it) => (rotOf(it) ? localBox({ ...it, rot: 0, _lb: undefined }) : localBox(it));
+  function toItemLocal(it, wx, wy) {
+    const s = it.s || 1; let x = (wx - (it.x || 0)) / s, y = (wy - (it.y || 0)) / s;
+    if (rotOf(it)) [x, y] = rotPt(it, x, y, -1);
+    return [x, y];
+  }
+  const r2 = (v) => Math.round(v * 100) / 100;
+  // вырезы для объекта по пути ластика (мировые точки): только куски пути рядом с объектом
+  function cutsFor(it, trail, r) {
+    const s = it.s || 1, lr = r / s, b = contentBox(it), m = lr + 1;
+    const L = trail.map(([x, y]) => toItemLocal(it, x, y));
+    const near = (a, c) => !(Math.max(a[0], c[0]) < b[0] - m || Math.max(a[1], c[1]) < b[1] - m || Math.min(a[0], c[0]) > b[2] + m || Math.min(a[1], c[1]) > b[3] + m);
+    if (L.length === 1) return near(L[0], L[0]) ? [{ r: r2(lr), p: [r2(L[0][0]), r2(L[0][1])] }] : [];
+    const out = []; let run = null;
+    for (let i = 1; i < L.length; i++) {
+      if (near(L[i - 1], L[i])) { if (!run) { run = [r2(L[i - 1][0]), r2(L[i - 1][1])]; out.push({ r: r2(lr), p: run }); } run.push(r2(L[i][0]), r2(L[i][1])); }
+      else run = null;
+    }
+    return out;
+  }
+  // точки самих чернил объекта (в его координатах): по средней линии и поперёк толщины, у залитых — и внутри
+  function inkSamples(it) {
+    if (it._ink) return it._ink;
+    const out = [];
+    const line = (pts, hwOf) => {
+      if (!pts.length) return;
+      // поперёк толщины — через каждую единицу доски, чтобы касание края в одну точку не терялось
+      const across = (x, y, nx, ny, hw) => { const n = Math.max(2, Math.ceil(2 * hw * 0.98)); for (let j = 0; j <= n; j++) { const k = (-0.98 + (1.96 * j) / n) * hw; out.push([x + nx * k, y + ny * k]); } };
+      if (pts.length === 1) { const hw = hwOf(pts[0][2]); for (let a = 0; a < 12; a++) for (const k of [0, 0.5, 0.92]) out.push([pts[0][0] + Math.cos(a * Math.PI / 6) * hw * k, pts[0][1] + Math.sin(a * Math.PI / 6) * hw * k]); return; }
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1], c = pts[i], dx = c[0] - a[0], dy = c[1] - a[1], L = Math.hypot(dx, dy); if (L < 1e-9) continue;
+        const nx = -dy / L, ny = dx / L, hw = hwOf(((a[2] ?? 1) + (c[2] ?? 1)) / 2), n = Math.max(1, Math.ceil(L / Math.min(1.5, Math.max(0.4, hw * 0.45))));
+        for (let j = 0; j < n; j++) across(a[0] + (dx * j) / n, a[1] + (dy * j) / n, nx, ny, hw);
+      }
+      // последняя точка и круглые концы линии
+      const e = pts[pts.length - 1]; out.push([e[0], e[1]]);
+      for (const end of [pts[0], e]) { const hwe = hwOf(end[2]); for (let a = 0; a < 24; a++) for (const k of [0.35, 0.7, 0.98]) out.push([end[0] + Math.cos(a * Math.PI / 12) * hwe * k, end[1] + Math.sin(a * Math.PI / 12) * hwe * k]); }
+    };
+    if (it.type === 'stroke') {
+      const thin = it.kind === 'pen' ? (it.thin ?? 0.5) : 0;
+      line(decodePts(it), (p) => it.size * Math.max(0.05, 0.5 - thin * (0.5 - (p ?? 1))));
+    } else if (it.type === 'text' || it.type === 'tex') { // текст и формулы: вся их рамка
+      const b = contentBox(it), st = Math.max(0.75, Math.min(b[2] - b[0], b[3] - b[1]) / 30);
+      for (let x = b[0]; x <= b[2]; x += st) for (let y = b[1]; y <= b[3]; y += st) out.push([x, y]);
+    } else {
+      const plain = rotOf(it) ? { ...it, rot: 0, _lb: undefined } : it;
+      for (const pc of shapePolys(plain).polys) line(pc.pts, () => pc.w / 2);
+      const filled = it.fill && (it.type === 'rect' || it.type === 'ellipse' || (it.type === 'poly' && it.closed));
+      if (filled) { const b = contentBox(it), st = Math.max(1, Math.min(b[2] - b[0], b[3] - b[1]) / 40); for (let x = b[0]; x <= b[2]; x += st) for (let y = b[1]; y <= b[3]; y += st) if (hitItem({ ...plain, x: 0, y: 0, s: 1, cuts: undefined }, x, y, 0)) out.push([x, y]); }
+    }
+    it._ink = out; return out;
+  }
+  // от объекта ничего не осталось — его удаляем совсем (залитые фигуры с рисунком внутри не трогаем)
+  function inkGone(it, cuts) {
+    if (it.type === 'fig' && it.fill) return false;
+    const S0 = inkSamples(it); if (!S0.length) return false;
+    for (const q of S0) if (!inCuts(cuts, q[0], q[1])) return false;
+    return true;
+  }
+  // состояние точного стирания: задетые линии и фигуры (для вырезов), задетые прочие объекты (удаляются), путь
+  function preciseState() { return { ids: new Set(), hidden: new Set(), trail: [], r: eraseR(), sweep: makeWholeEraser(true) }; }
+  function preciseStep(st, a, b) {
+    st.trail.push([b[0], b[1]]);
+    const tmp = new Set(), skip = { has: (id) => st.ids.has(id) || st.hidden.has(id) };
+    st.sweep(a, b, st.r, tmp, skip);
+    for (const id of tmp) { const it = items.get(id); if (it) (CUTTABLE.has(it.type) ? st.ids : st.hidden).add(id); }
+  }
+  // вырезы, которые сейчас рисуются, пока ластик ещё ведут (свой и собеседника)
+  function pvCuts(it, rv) {
+    let c = null;
+    if (S.cutPv && S.cutPv.ids.has(it.id)) c = cutsFor(it, S.cutPv.trail, S.cutPv.r);
+    if (rv && rv.cuts) for (const e of rv.cuts) if (e.ids.has(it.id)) (c ||= []).push(...cutsFor(it, e.trail, e.r));
+    return c && c.length ? { cuts: c } : undefined;
+  }
+  function preciseEraserGesture(pt) {
+    const st = preciseState();
+    S.hidden = st.hidden; S.pieces = null; S.cutPv = st;
+    const g = { isEraser: true, sid: uid(), precise: true };
+    const rec = [];
+    const add = (p) => rec.push([Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10, Math.round(st.r * 100) / 100]);
+    g.pvEraser = () => ({ sid: g.sid, pts: rec });
+    let last = pt;
+    preciseStep(st, pt, pt); add(pt); invalidate();
+    g.move = (p) => { preciseStep(st, last, p); last = p; add(p); invalidate(); };
+    g.end = () => {
+      S.hidden = new Set(); S.cutPv = null; S.pieces = null;
+      if (!st.ids.size && !st.hidden.size) { invalidate(); return; }
+      act(() => {
+        for (const id of st.hidden) yItems.delete(id);
+        for (const id of st.ids) {
+          const it = items.get(id); if (!it) continue;
+          const add2 = cutsFor(it, st.trail, st.r); if (!add2.length) continue;
+          const cuts = [...(it.cuts || []), ...add2];
+          if (inkGone(it, cuts)) yItems.delete(id); else setFields(id, { cuts });
+        }
+      });
+    };
+    g.cancel = () => { S.hidden = new Set(); S.cutPv = null; S.pieces = null; invalidate(); };
+    return g;
+  }
   function eraserGesture(pt) {
     const precise = prefs.eraserPrecise;
+    if (!precise) return wholeEraserGesture(pt);
+    return preciseEraserGesture(pt);
     S.hidden = new Set(); S.pieces = precise ? new Map() : null;
     let last = pt;
     const g = { isEraser: true, sid: uid(), precise };
@@ -1989,6 +2151,25 @@ function startBoard(room) {
           setFields(sid, { cover: sh.cover.flatMap((c) => born.get(c) || [c]) });
         }
       });
+    };
+    g.cancel = () => { S.hidden = new Set(); S.pieces = null; };
+    return g;
+  }
+  // «Целиком»: проверяется весь путь ластика между событиями мыши. Линии скрываются только при настоящем касании:
+  // заранее по предсказанию браузера не скрываем, иначе линия рядом с ластиком мигает, если рука остановилась.
+  function wholeEraserGesture(pt) {
+    const sweep = makeWholeEraser();
+    const real = new Set();
+    S.hidden = new Set(); S.pieces = null;
+    let last = pt;
+    const g = { isEraser: true, sid: uid(), precise: false, pvEraser: () => null };
+    const show = () => { S.hidden = new Set(real); };
+    sweep(pt, pt, eraseR(), real); show(); invalidate();
+    g.move = (p) => { sweep(last, p, eraseR(), real); last = p; show(); invalidate(); };
+    g.end = () => {
+      S.hidden = new Set(); S.pieces = null;
+      if (!real.size) return;
+      act(() => { for (const id of real) yItems.delete(id); });
     };
     g.cancel = () => { S.hidden = new Set(); S.pieces = null; };
     return g;
@@ -2543,7 +2724,7 @@ function startBoard(room) {
         ta.remove(); bar.remove(); S.editingId = null;
         const text = ta.value.replace(/\s+$/, '');
         if (commit) act(() => {
-          if (it && items.has(it.id)) { if (!text && !isNote) yItems.delete(it.id); else setFields(it.id, { text }); }
+          if (it && items.has(it.id)) { if (!text && !isNote) yItems.delete(it.id); else setFields(it.id, { text, ...(it.cuts && text !== it.text ? { cuts: null } : {}) }); }
           else if (text) addItem({ id: uid(), type: 'text', page: S.page, z: zTop(S.page), x, y, s: 1, fs, color, text });
         });
         invalidate();
@@ -2632,7 +2813,7 @@ function startBoard(room) {
       const tex = ta.value.trim(); let newId = null;
       if (tex && texErr) { prev.classList.remove('shake'); void prev.offsetWidth; prev.classList.add('shake'); ta.focus(); return; }
       act(() => {
-        if (it && items.has(it.id)) { if (!tex) yItems.delete(it.id); else setFields(it.id, { tex }); }
+        if (it && items.has(it.id)) { if (!tex) yItems.delete(it.id); else setFields(it.id, { tex, ...(it.cuts && tex !== it.tex ? { cuts: null } : {}) }); }
         else if (tex) { newId = uid(); addItem({ id: newId, type: 'tex', page: S.page, z: zTop(S.page), x: wx, y: wy, s: 1, fs, color, tex }); }
       });
       closeEditors(false);
@@ -2870,18 +3051,20 @@ function startBoard(room) {
     return { x: it.x + x0 * s, y: it.y + y0 * s, pts: Q.map(([x, y]) => [x - x0, y - y0]) };
   }
   // Зеркало слева направо: фигура остаётся на месте, меняется только сторона. null — отражать нечего (симметрична).
+  // вырезы точного ластика отражаются вместе с фигурой
+  const flipCuts = (it, f) => (it.cuts ? { cuts: it.cuts.map((c) => ({ r: c.r, p: c.p.map((v, i) => (i % 2 ? v : f(v))) })) } : {});
   function mirrorFields(it) {
     if (it.locked) return null;
     const flipX = (xs) => { const a = Math.min(...xs), b = Math.max(...xs); return (x) => a + b - x; };
     if (it.type === 'poly') {
       const f = flipX(it.pts.map((p) => p[0])); const Q = it.pts.map(([x, y]) => [f(x), y]);
-      if (Q.every((q) => it.pts.some((p) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 0.75))) return null; // симметрична — отражать нечего
-      return { pts: Q };
+      if (Q.every((q) => it.pts.some((p) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 0.75)) && !it.cuts) return null; // симметрична — отражать нечего
+      return { pts: Q, ...flipCuts(it, f) };
     }
-    if (it.type === 'line' || it.type === 'arrow') { const f = flipX([it.x1, it.x2]); return it.x1 === it.x2 ? null : { x1: f(it.x1), x2: f(it.x2) }; }
+    if (it.type === 'line' || it.type === 'arrow') { const f = flipX([it.x1, it.x2]); return it.x1 === it.x2 ? null : { x1: f(it.x1), x2: f(it.x2), ...flipCuts(it, f) }; }
     if (it.type === 'fig' && !SOLID_KINDS.has(it.kind) && FIGS[it.kind]) {
       if (['square', 'rhombus', 'triangle', 'eqtriangle', 'pentagon', 'hexagon', 'inscribed', 'circumscribed', 'trapezoid', 'axes'].includes(it.kind)) return null;
-      return { flip: !it.flip, ...(it.rot ? { rot: -it.rot } : {}) };
+      return { flip: !it.flip, ...(it.rot ? { rot: -it.rot } : {}), ...flipCuts(it, (x) => it.w - x) };
     }
     return null;
   }
@@ -4043,6 +4226,13 @@ function startBoard(room) {
   const paintMatBtn = () => matBtn.classList.toggle('pro-locked', ACCOUNTS && !isPro());
   paintMatBtn(); onAccount(paintMatBtn);
   topRight.append(...[rolePill, statusBtn, shareBtn, followBtn, ACCOUNTS ? matBtn : null, fsBtn, el('div', { class: 'sep' }), exitBtn].filter(Boolean));
+  // до конца подарка Про семь дней и меньше: напоминаем при каждом открытии доски
+  setTimeout(() => {
+    const n = ACCOUNTS && trialNag(); if (!n) return;
+    // под верхними панелями, чтобы не закрывать инструменты
+    let y = 12; for (const e of document.querySelectorAll('.bar')) { const r = e.getBoundingClientRect(); if (r.height && r.height < 140 && r.top < 160) y = Math.max(y, r.bottom + 10); }
+    n.style.top = Math.round(y) + 'px'; document.body.append(n);
+  }, 1200);
   // Заготовка из Материалов: те же объекты, что были выделены, — по центру точки
   function insertClip(arr, at) {
     if (!arr?.length) return;
@@ -4614,7 +4804,7 @@ function startBoard(room) {
     hub.startTabs(room);
     if (!/[?&]nopeer\b/.test(location.search)) hub.startPeer(room);
     if (!prefs.role && !/[?&]nopeer\b/.test(location.search)) askRole(); else countVisit(); // в тестах (nopeer) не спрашиваем
-    window.__doska = { remotePv, peersById, peerAct, goToPeer, solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo, selectionBox: () => selectionBox(), handles: () => handles(selectionBox()), Y, setPage, pages, viewByPage, hist: () => hist, mat: () => mat }; window.__MC = ManualConnect;
+    window.__doska = { eraseR: () => eraseR(), remotePv, peersById, peerAct, goToPeer, solidSel: () => solidSel(), solidHit: (x, y) => { const so = solidSel(); return so ? solidHit(so, x, y) : 'nosel'; }, STATS, dbg: () => gesture && gesture.dbg && gesture.dbg(), doc, S, items, hub, setTool, act, addItem, pageItems, toWorld, toScreen, undo, selectionBox: () => selectionBox(), handles: () => handles(selectionBox()), Y, setPage, pages, viewByPage, hist: () => hist, mat: () => mat }; window.__MC = ManualConnect;
   };
   // Доска из шаблона: листы и объекты шаблона добавляются до того, как заведётся пустой «Лист 1»
   let tplLoading = !!LS.get('pendingTpl:' + room, null);

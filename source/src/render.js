@@ -288,6 +288,7 @@ export function hitItem(it, wx, wy, tol) {
   const [a, b, c, d] = localBox(it);
   if (px < a - t || py < b - t || px > c + t || py > d + t) return false;
   if (rotOf(it)) { const { rot, _lb, ...plain } = it; const [qx, qy] = rotPt(it, px, py, -1); return hitItem(plain, (it.x || 0) + qx * s, (it.y || 0) + qy * s, tol); }
+  if (it.cuts && inCuts(it.cuts, px, py, t)) return false; // здесь всё стёрто точным ластиком
   switch (it.type) {
     case 'stroke': {
       const p = decodePts(it); const r = t + it.size / 2;
@@ -532,7 +533,13 @@ export function bakeShape(it, kx, ky, ax, ay) {
   else if (it.type === 'poly') out.pts = it.pts.map(([px, py]) => [px * fx, py * fy]);
   else Object.assign(out, { w: it.w * fx, h: it.h * fy });
   if (it.doff) out.doff = it.doff * s;
+  if (it.cuts) out.cuts = scaleCuts(it.cuts, fx, fy);
   return out;
+}
+// Вырезы точного ластика при растяжении фигуры растягиваются вместе с ней
+export function scaleCuts(cuts, fx, fy) {
+  const k = Math.sqrt(Math.abs(fx * fy));
+  return cuts.map((c) => ({ r: c.r * k, p: c.p.map((v, i) => (i % 2 ? v * fy : v * fx)) }));
 }
 // ctx уже в мировых координатах. scale — пикселей экрана на единицу мира (для детализации).
 // Метка «Д/З»: размеры от высоты значка sz
@@ -549,13 +556,16 @@ export function hwGeom(it) {
 let shadePeek = true;
 export function setShadePeek(v) { shadePeek = !!v; }
 function roundRectPath(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath(); }
-export function drawItem(ctx, it, ov, scale, pieces) {
+export function drawItem(ctx, it, ov, scale, pieces, opt) {
   if (ov && ov.ids && ov.ids.has(it.id) && SCALE_BAKED.has(it.type) && !pieces) {
     const kx = ov.k || ov.kx || 1, ky = ov.k || ov.ky || 1;
     if (kx !== 1 || ky !== 1) {
       const b = bakeShape(it, kx, ky, ov.ax, ov.ay);
-      return drawItem(ctx, { ...it, ...b, x: b.x + (ov.dx || 0), y: b.y + (ov.dy || 0) }, null, scale);
+      return drawItem(ctx, { ...it, ...b, x: b.x + (ov.dx || 0), y: b.y + (ov.dy || 0) }, null, scale, null, opt);
     }
+  }
+  if (!(opt && opt.noCut) && CUTTABLE.has(it.type) && ((it.cuts && it.cuts.length) || (opt && opt.cuts && opt.cuts.length))) {
+    return drawCut(ctx, it, ov, scale, opt && opt.cuts ? [...(it.cuts || []), ...opt.cuts] : it.cuts);
   }
   const t = itemTransform(it, ov);
   ctx.save();
@@ -567,7 +577,7 @@ export function drawItem(ctx, it, ov, scale, pieces) {
   if (rotOf(it)) { const [rcx, rcy] = rotCenter(it); ctx.translate(rcx, rcy); ctx.rotate(rotOf(it) * Math.PI / 180); ctx.translate(-rcx, -rcy); }
   switch (it.type) {
     case 'stroke': {
-      if (it.kind === 'hl') { ctx.globalAlpha = 0.38; }
+      if (it.kind === 'hl' && !(opt && opt.noAlpha)) { ctx.globalAlpha = 0.38; }
       if (it.kind === 'dash') { for (const p of pieces || [decodePts(it)]) paintInk(ctx, pieces && p[0] && p[0][3] != null ? { ...it, doff: p[0][3] } : it, p); break; }
       if (inkUniform(it)) { if (pieces) for (const p of pieces) strokeCenter(ctx, it, it.v === 2 ? curvePath(p) : centerPath(p)); else strokeCenter(ctx, it, strokePath(it)); }
       else if (pieces) for (const p of pieces) ctx.fill(outlinePath(p, strokeOptions(it, true)));
@@ -706,5 +716,72 @@ export function drawBackground(ctx, bg, view, w, h) {
   };
   if (bg === 'grid') pass(false);
   pass(true);
+  ctx.restore();
+}
+
+// ---------- точный ластик: вырезы ----------
+// it.cuts = [{ r, p: [x0, y0, x1, y1, ...] }]: путь центра ластика и его радиус в координатах самого объекта (до поворота).
+// Стирается ровно то, что попало под круг ластика: объект рисуется на отдельный слой, из слоя вырезается
+// полоса под путём ластика (круглая кисть шириной 2r), и слой кладётся на доску. Толстая линия, задетая краем,
+// теряет только край, а не всю толщину.
+export const CUTTABLE = new Set(['stroke', 'line', 'arrow', 'rect', 'ellipse', 'poly', 'fig', 'text', 'tex']);
+function cutPathOf(c) {
+  const a = c.p, p = new Path2D(); if (a.length < 2) return p;
+  p.moveTo(a[0], a[1]);
+  if (a.length === 2) p.lineTo(a[0] + 1e-3, a[1]);
+  for (let i = 2; i < a.length; i += 2) p.lineTo(a[i], a[i + 1]);
+  return p;
+}
+// точка (x, y) объекта лежит в стёртом месте дальше, чем на tol от края выреза
+export function inCuts(cuts, x, y, tol = 0) {
+  for (const c of cuts) {
+    const a = c.p, R = c.r - tol; if (R <= 0) continue;
+    if (a.length === 2) { if (Math.hypot(x - a[0], y - a[1]) < R) return true; continue; }
+    for (let i = 2; i < a.length; i += 2) if (distSeg(x, y, a[i - 2], a[i - 1], a[i], a[i + 1]) < R) return true;
+  }
+  return false;
+}
+let cutLayer = null;
+function drawCut(ctx, it, ov, scale, cuts) {
+  const m = ctx.getTransform(), CW = ctx.canvas.width, CH = ctx.canvas.height;
+  const b = worldBox(it, ov), pad = 2;
+  const P = [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]].map(([x, y]) => [m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f]);
+  const x0 = Math.max(0, Math.floor(Math.min(...P.map((q) => q[0])) - pad)), y0 = Math.max(0, Math.floor(Math.min(...P.map((q) => q[1])) - pad));
+  const x1 = Math.min(CW, Math.ceil(Math.max(...P.map((q) => q[0])) + pad)), y1 = Math.min(CH, Math.ceil(Math.max(...P.map((q) => q[1])) + pad));
+  const w = x1 - x0, h = y1 - y0; if (w <= 0 || h <= 0) return;
+  // готовый слой берём из запаса, если ни объект, ни вырезы, ни вид не менялись (пока ведут ластик, меняется только задетое сейчас)
+  let n = 0; for (const c of cuts) n += c.p.length;
+  const lc = cuts[cuts.length - 1], key = [m.a, m.b, m.c, m.d, m.e, m.f, x0, y0, w, h, cuts.length, n, lc.r, lc.p[lc.p.length - 2], lc.p[lc.p.length - 1], ov ? [ov.dx, ov.dy, ov.k, ov.kx, ov.ky].join('/') : ''].join(',');
+  const hit = cutCache.get(it);
+  if (hit && hit.key === key) { cutUse.delete(it); cutUse.set(it, hit); return blitCut(ctx, it, hit.cv, w, h, x0, y0); }
+  const keep = w * h <= 4e6;
+  const cv = keep ? (typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : Object.assign(document.createElement('canvas'), { width: w, height: h })) : (cutLayer ||= (typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(w, h) : document.createElement('canvas')));
+  if (!keep && (cv.width < w || cv.height < h)) { cv.width = Math.max(cv.width, w); cv.height = Math.max(cv.height, h); }
+  const l = cv.getContext('2d');
+  l.setTransform(1, 0, 0, 1, 0, 0); l.globalCompositeOperation = 'source-over'; l.globalAlpha = 1; l.clearRect(0, 0, w + 1, h + 1);
+  l.setTransform(m.a, m.b, m.c, m.d, m.e - x0, m.f - y0);
+  drawItem(l, it, ov, scale, null, { noCut: true, noAlpha: true });
+  const t = itemTransform(it, ov);
+  l.translate(t.x, t.y); l.scale(t.sx, t.sy);
+  if (rotOf(it)) { const [rcx, rcy] = rotCenter(it); l.translate(rcx, rcy); l.rotate(rotOf(it) * Math.PI / 180); l.translate(-rcx, -rcy); }
+  l.globalCompositeOperation = 'destination-out'; l.globalAlpha = 1;
+  l.lineCap = 'round'; l.lineJoin = 'round'; l.strokeStyle = '#000'; l.fillStyle = '#000'; l.setLineDash([]);
+  for (const c of cuts) {
+    if (c.p.length === 2) { l.beginPath(); l.arc(c.p[0], c.p[1], c.r, 0, Math.PI * 2); l.fill(); continue; }
+    l.lineWidth = 2 * c.r; l.stroke(cutPathOf(c));
+  }
+  l.globalCompositeOperation = 'source-over';
+  if (keep) {
+    if (hit) { cutPx -= hit.px; cutUse.delete(it); }
+    const e = { key, cv, px: w * h }; cutCache.set(it, e); cutUse.set(it, e); cutPx += e.px;
+    for (const [k, v] of cutUse) { if (cutPx <= 24e6) break; cutUse.delete(k); cutCache.delete(k); cutPx -= v.px; }
+  }
+  blitCut(ctx, it, cv, w, h, x0, y0);
+}
+const cutCache = new WeakMap(), cutUse = new Map(); let cutPx = 0;
+function blitCut(ctx, it, cv, w, h, x0, y0) {
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+  if (it.type === 'stroke' && it.kind === 'hl') ctx.globalAlpha *= 0.38;
+  ctx.drawImage(cv, 0, 0, w, h, x0, y0, w, h);
   ctx.restore();
 }
