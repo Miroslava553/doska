@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS feedback (id INTEGER PRIMARY KEY, t INTEGER, kind TEX
 CREATE TABLE IF NOT EXISTS gifts (mail TEXT PRIMARY KEY, user INTEGER, t INTEGER, until INTEGER, sent INTEGER DEFAULT 0);
 `);
 try { db.exec('ALTER TABLE subs ADD COLUMN trial INTEGER DEFAULT 0'); } catch {} // 1: Про включён подарком
+try { db.exec('ALTER TABLE users ADD COLUMN seen INTEGER'); } catch {} // когда человек последний раз открывал Lodl (с точностью до часа)
 const q = (sql) => { const st = db.prepare(sql); return { get: (...a) => st.get(...a), all: (...a) => st.all(...a), run: (...a) => st.run(...a) }; };
 const tx = (f) => { db.exec('BEGIN IMMEDIATE'); try { const r = f(); db.exec('COMMIT'); return r; } catch (e) { db.exec('ROLLBACK'); throw e; } };
 
@@ -131,6 +132,7 @@ function applyPayment(p) {
   const row = q('SELECT * FROM payments WHERE id = ?').get(p.id);
   if (!row) { log('unknown payment', p.id); return; }
   if (row.status === 'succeeded' || row.status === 'canceled') return;
+  if (!row.user) { q('UPDATE payments SET status = ?, done = ? WHERE id = ?').run(p.status, now(), p.id); log('payment of deleted account', p.id, p.status); return; } // аккаунт удалили, пока шла оплата
   const amount = Math.round(parseFloat(p.amount && p.amount.value) || 0);
   if (p.status === 'succeeded' && amount !== row.amount) log('amount mismatch', p.id, amount, row.amount);
   if (p.status === 'succeeded' && p.paid) {
@@ -235,6 +237,7 @@ function checkCode(email, code) {
   let u = q('SELECT id FROM users WHERE email = ?').get(email);
   if (!u) { q('INSERT INTO users (email, created) VALUES (?, ?)').run(email, now()); u = q('SELECT id FROM users WHERE email = ?').get(email); }
   const token = rnd();
+  q('UPDATE users SET seen = ? WHERE id = ?').run(now(), u.id);
   q('INSERT INTO sessions (hash, user, created, seen) VALUES (?,?,?,?)').run(sha(token), u.id, now(), now());
   return { ok: true, token, user: u.id };
 }
@@ -253,7 +256,7 @@ const COOKIE = 'lodl_s';
 function sessionUser(req) {
   const m = /(?:^|;\s*)lodl_s=([A-Za-z0-9_-]+)/.exec(req.headers.cookie || ''); if (!m) return null;
   const s = q('SELECT user, seen FROM sessions WHERE hash = ?').get(sha(m[1])); if (!s) return null;
-  if (now() - s.seen > 3600e3) q('UPDATE sessions SET seen = ? WHERE hash = ?').run(now(), sha(m[1]));
+  if (now() - s.seen > 3600e3) { q('UPDATE sessions SET seen = ? WHERE hash = ?').run(now(), sha(m[1])); q('UPDATE users SET seen = ? WHERE id = ?').run(now(), s.user); }
   return s.user;
 }
 const secure = SITE.startsWith('https:');
@@ -301,7 +304,8 @@ route('POST', /^\/api\/account\/delete$/, ({ user, res }) => {
   const s = subOf(user);
   for (const b of q('SELECT id FROM blobs WHERE user = ?').all(user)) fs.rm(blobPath(user, b.id), { force: true }, () => {});
   fs.rm(path.join(DATA, 'blobs', String(user)), { recursive: true, force: true }, () => {});
-  q('UPDATE gifts SET user = NULL WHERE user = ?').run(user); // отметка о подарке остаётся без связи с аккаунтом: номер аккаунта может достаться другому
+  q('UPDATE gifts SET user = NULL WHERE user = ?').run(user);
+  q('UPDATE payments SET user = NULL WHERE user = ?').run(user); // оплаты остаются для налоговой отчётности, но больше ни к кому не привязаны // отметка о подарке остаётся без связи с аккаунтом: номер аккаунта может достаться другому
   q('DELETE FROM users WHERE id = ?').run(user); // подписка, сессии и облако удаляются вместе с ним
   setCookie(res, '', 0); log('account deleted', user, s && proActive(s) ? '(с действующим Про)' : ''); return { ok: true };
 });
@@ -370,6 +374,59 @@ route('POST', /^\/api\/feedback$/, async ({ req, user, ip }) => {
   if (to) mail.send(to, 'feedback', { site: SITE, kind: FB_KINDS[kind], text, contact: contact || 'не указана', info, replyTo: okEmail(contact) ? contact : '' }).catch((e) => log('mail feedback', e.message));
   return { ok: true };
 }, { anon: true });
+
+// ---------- учёт для владельца ----------
+// Страница lodl.ru/admin.html берёт отсюда сводку. Открыть её может только тот, кто вошёл под почтой владельца.
+const OWNERS = () => new Set(String(env.OWNER_EMAILS || 'miroslavakolom@mail.ru').split(/[\s,;]+/).concat(env.SMTP_USER || '').map((e) => e.trim().toLowerCase()).filter(Boolean));
+const MSK = 3 * 3600e3; // Москва без перехода на летнее время
+const mskDay = (t) => new Date(t + MSK).toISOString().slice(0, 10);
+function adminStats() {
+  const t = now(), today0 = Date.parse(mskDay(t) + 'T00:00:00Z') - MSK;
+  const one = (sql, ...a) => q(sql).get(...a);
+  const users = q(`SELECT u.id, u.email, u.created, COALESCE(u.seen, (SELECT MAX(seen) FROM sessions WHERE user = u.id)) AS seen FROM users u ORDER BY u.created DESC`).all();
+  const subs = new Map(q('SELECT * FROM subs').all().map((x) => [x.user, x]));
+  const paid = new Map(q("SELECT user, SUM(amount) AS sum, COUNT(*) AS n FROM payments WHERE status = 'succeeded' GROUP BY user").all().map((x) => [x.user, x]));
+  const boards = new Map(q("SELECT user, COUNT(*) AS n FROM kv WHERE coll = 'boards' GROUP BY user").all().map((x) => [x.user, x.n]));
+  const giftUsers = new Map(q('SELECT user, t FROM gifts WHERE user IS NOT NULL').all().map((x) => [x.user, x.t]));
+  const list = users.map((u) => {
+    const s = subs.get(u.id), act = proActive(s, t);
+    let plan = 'free';
+    if (s && act) plan = s.trial ? 'trial' : s.period === 'year' ? 'year' : 'month';
+    else if (s && s.until) plan = s.trial ? 'trial-ended' : 'ended';
+    return { email: u.email, created: u.created, seen: u.seen || null, plan, until: s && s.until ? s.until : null, canceled: !!(s && s.canceled && !s.trial),
+      gift: giftUsers.get(u.id) || null, paid: paid.get(u.id)?.sum || 0, payments: paid.get(u.id)?.n || 0, boards: boards.get(u.id) || 0 };
+  });
+  const cnt = (f) => list.filter(f).length;
+  const sumPay = (from) => one("SELECT COALESCE(SUM(amount), 0) AS s, COUNT(*) AS n FROM payments WHERE status = 'succeeded' AND COALESCE(done, created) >= ?", from);
+  const monthStart = Date.parse(mskDay(t).slice(0, 8) + '01T00:00:00Z') - MSK;
+  // по дням за 30 дней: новые, включили две недели, оплаты
+  const days = [];
+  for (let i = 29; i >= 0; i--) {
+    const a = today0 - i * DAY, b = a + DAY;
+    days.push({ day: mskDay(a), users: cnt((u) => u.created >= a && u.created < b), gifts: one('SELECT COUNT(*) AS n FROM gifts WHERE t >= ? AND t < ?', a, b).n,
+      money: one("SELECT COALESCE(SUM(amount), 0) AS s FROM payments WHERE status = 'succeeded' AND COALESCE(done, created) >= ? AND COALESCE(done, created) < ?", a, b).s });
+  }
+  const giftsAll = one('SELECT COUNT(*) AS n FROM gifts').n;
+  const giftThenPaid = one("SELECT COUNT(DISTINCT g.user) AS n FROM gifts g JOIN payments p ON p.user = g.user AND p.status = 'succeeded' AND p.kind = 'first' AND COALESCE(p.done, p.created) >= g.t").n;
+  return {
+    at: t,
+    users: { total: list.length, today: cnt((u) => u.created >= today0), week: cnt((u) => u.created >= t - 7 * DAY), month: cnt((u) => u.created >= t - 30 * DAY),
+      active7: cnt((u) => u.seen && u.seen >= t - 7 * DAY), active30: cnt((u) => u.seen && u.seen >= t - 30 * DAY) },
+    pro: { month: cnt((u) => u.plan === 'month'), year: cnt((u) => u.plan === 'year'), canceled: cnt((u) => (u.plan === 'month' || u.plan === 'year') && u.canceled), trial: cnt((u) => u.plan === 'trial') },
+    gifts: { total: giftsAll, active: cnt((u) => u.plan === 'trial'), paidAfter: giftThenPaid },
+    money: { total: sumPay(0).s, payments: sumPay(0).n, monthSum: sumPay(monthStart).s, last30: sumPay(t - 30 * DAY).s },
+    boards: { listed: one("SELECT COUNT(*) AS n FROM kv WHERE coll = 'boards'").n, stored: one('SELECT COUNT(*) AS n FROM boards').n },
+    storage: one('SELECT COALESCE(SUM(size), 0) AS n FROM blobs').n,
+    feedback: q('SELECT t, kind, text, contact FROM feedback ORDER BY t DESC LIMIT 30').all().map((f) => ({ ...f, kind: FB_KINDS[f.kind] || f.kind })),
+    feedbackTotal: one('SELECT COUNT(*) AS n FROM feedback').n,
+    days, list,
+  };
+}
+route('GET', /^\/api\/admin$/, ({ user }) => {
+  const u = q('SELECT email FROM users WHERE id = ?').get(user);
+  if (!u || !OWNERS().has(u.email)) throw fail(404, 'Не найдено');
+  return adminStats();
+});
 
 // облако: записи (папки, материалы, шаблоны, список досок)
 const proOrThrow = (user) => { if (!proActive(subOf(user))) throw fail(402, 'Нужна подписка Про'); };
@@ -465,7 +522,8 @@ const TOKEN_FILE = env.SETUP_TOKEN_FILE || '/etc/lodl/setup-token';
 const setupToken = () => { try { if (now() - fs.statSync(TOKEN_FILE).mtimeMs > DAY) return ''; return fs.readFileSync(TOKEN_FILE, 'utf8').trim(); } catch { return ''; } };
 const FIELDS = [['SHOP_ID', 'ShopID магазина', 'Например 1509002'], ['SECRET_KEY', 'Секретный ключ', 'live_… из раздела «Интеграция → Ключи API»'],
   ['SMTP_HOST', 'Почтовый сервер (SMTP)', 'Например smtp.mail.ru'], ['SMTP_PORT', 'Порт', '465'], ['SMTP_USER', 'Логин почты', 'no-reply@ваш-домен'],
-  ['SMTP_PASS', 'Пароль почты', 'Пароль для внешних приложений'], ['MAIL_FROM', 'От кого письма', 'Lodl <no-reply@ваш-домен>']];
+  ['SMTP_PASS', 'Пароль почты', 'Пароль для внешних приложений'], ['MAIL_FROM', 'От кого письма', 'Lodl <no-reply@ваш-домен>'],
+  ['OWNER_EMAILS', 'Почта владельца для страницы учёта', 'Через запятую, если адресов несколько']];
 const htmlEsc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 function setupPage(token, msg = '') {
   const cur = (k) => (k === 'SECRET_KEY' || k === 'SMTP_PASS' ? '' : env[k] || '');

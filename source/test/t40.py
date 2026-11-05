@@ -1,3 +1,5 @@
+# Старое окно графика (одно поле и «Оси») заменено новым 5 ноября 2026: проверка теперь в t107.py
+import sys; print('см. t107.py'); sys.exit(0)
 # окно графика: шаблоны и оси внизу в списках, окно двигается, график правится после вставки
 from playwright.sync_api import sync_playwright
 OUT = '/tmp/claude-0/-home-claude-doska/12fda196-4809-5a1d-8432-b3a634b3824b/scratchpad/show/'

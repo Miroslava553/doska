@@ -2,7 +2,7 @@
 'use strict';
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lodl-'));
-Object.assign(process.env, { DATA_DIR: dir, SITE_URL: 'http://localhost:4011', SHOP_ID: 'shop1', SECRET_KEY: 'key1', YK_API: 'http://127.0.0.1:4010', AUTOPAY: '1', PORT: '4011' });
+Object.assign(process.env, { DATA_DIR: dir, SITE_URL: 'http://localhost:4011', SHOP_ID: 'shop1', SECRET_KEY: 'key1', YK_API: 'http://127.0.0.1:4010', AUTOPAY: '1', PORT: '4011', OWNER_EMAILS: 'boss@mail.ru, Second@Mail.ru' });
 const yk = require('./mockyk.js');
 const mails = []; const ol = console.log; console.log = (...a) => { const s = a.join(' '); if (s.includes('[письмо')) mails.push(s); else ol(...a); };
 const { server, renewTick, db } = require('../index.js');
@@ -178,6 +178,24 @@ async function login(c, email) { await c('POST', '/api/login/start', { email });
   db.prepare('UPDATE subs SET until = ? WHERE user = ?').run(Date.now() - 1000, oid); np = yk.log.length; await renewTick();
   ok('после подарка старая карта не списывается', yk.log.length === np && !(await o('GET', '/api/me')).d.pro.active);
   ok('аноним подарок не включит', (await anon('POST', '/api/gift')).s === 401);
+  // учёт для владельца
+  const own = client(), oth = client();
+  ok('учёт без входа закрыт', (await anon('GET', '/api/admin')).s === 401);
+  await login(oth, 'stranger@mail.ru'); ok('учёт под чужой почтой не открывается', (await oth('GET', '/api/admin')).s === 404);
+  await login(own, 'boss@mail.ru'); r = await own('GET', '/api/admin');
+  const nUsers = db.prepare('SELECT COUNT(*) AS n FROM users').get().n, nGifts = db.prepare('SELECT COUNT(*) AS n FROM gifts').get().n;
+  const sumPaid = db.prepare("SELECT COALESCE(SUM(amount),0) AS s FROM payments WHERE status = 'succeeded'").get().s;
+  ok('учёт открывается под почтой владельца', r.s === 200 && r.d.users && Array.isArray(r.d.list));
+  ok('учёт: число пользователей, двух недель и выручка сходятся с базой', r.d.users.total === nUsers && r.d.gifts.total === nGifts && r.d.money.total === sumPaid && sumPaid > 0);
+  ok('учёт: 30 дней по дням, сегодня новые есть', r.d.days.length === 30 && r.d.days[29].users >= 1 && r.d.users.today >= 1);
+  const gRow = r.d.list.find((u) => u.email === 'gift@mail.ru');
+  ok('учёт: у пользователя видны тариф, оплата и подарок', gRow && gRow.plan === 'month' && gRow.paid === 199 && gRow.gift > 0);
+  ok('учёт: последний визит отмечается при входе', r.d.list.find((u) => u.email === 'boss@mail.ru').seen > Date.now() - 60e3);
+  await login(oth, 'second@mail.ru'); ok('второй адрес владельца тоже открывает учёт', (await oth('GET', '/api/admin')).s === 200);
+  // оплата закончилась уже после удаления аккаунта: никому чужому Про не включается
+  const del = client(); await login(del, 'gone@mail.ru'); r = await del('POST', '/api/pay', { period: 'month' }); const gp2 = r.d.url.split('/').pop();
+  await del('POST', '/api/account/delete'); yk.finish(gp2, true); await anon('POST', '/api/yk/hook', { object: { id: gp2 } });
+  ok('оплата после удаления аккаунта никому не включила Про', !db.prepare('SELECT 1 FROM subs WHERE user IS NULL OR user NOT IN (SELECT id FROM users)').get() && db.prepare('SELECT status FROM payments WHERE id = ?').get(gp2).status === 'succeeded');
   ol(fails ? `ОШИБОК: ${fails}` : 'ВСЁ ВЕРНО');
   server.close(); yk.server.close(); fs.rmSync(dir, { recursive: true, force: true }); process.exit(fails ? 1 : 0);
 })().catch((e) => { ol(e); process.exit(1); });

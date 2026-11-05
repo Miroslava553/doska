@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Учёт Lodl</title>
+<link rel="icon" href="logo.png">
+<style>
+  :root { --bg: #f6f7fb; --card: #fff; --ink: #15171a; --muted: #6c727f; --line: #eceef3; --blue: #4c6ef5; --blue-ink: #3b5bdb; --blue-soft: #edf2ff; --green: #2f9e44; --green-soft: #ebfbee; --orange: #e8590c; --orange-soft: #fff4e6; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px; padding: 12px 20px; background: rgba(255,255,255,.92); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  header img { width: 32px; height: 32px; border-radius: 9px; }
+  header h1 { font-size: 18px; margin: 0; font-weight: 700; }
+  header .at { color: var(--muted); font-size: 13px; margin-left: auto; }
+  button { font: inherit; cursor: pointer; }
+  .btn { height: 36px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--blue-soft); color: var(--blue-ink); font-weight: 600; }
+  .btn:hover { filter: brightness(.97); }
+  main { max-width: 1120px; margin: 0 auto; padding: 20px 16px 60px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border-radius: 16px; padding: 16px 18px; box-shadow: 0 4px 18px rgba(15, 23, 42, .05), 0 0 0 1px rgba(15, 23, 42, .04); }
+  .card .k { color: var(--muted); font-size: 13px; }
+  .card .v { font-size: 30px; font-weight: 750; letter-spacing: -.02em; margin: 2px 0 4px; }
+  .card .s { color: var(--muted); font-size: 13px; }
+  .card .s b { color: var(--ink); font-weight: 600; }
+  .plus { color: var(--green); font-weight: 600; }
+  h2 { font-size: 16px; margin: 28px 0 10px; }
+  .chart { background: var(--card); border-radius: 16px; padding: 16px 18px 10px; box-shadow: 0 4px 18px rgba(15, 23, 42, .05), 0 0 0 1px rgba(15, 23, 42, .04); }
+  .chart .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); margin-bottom: 8px; flex-wrap: wrap; }
+  .chart .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .bars { display: flex; align-items: flex-end; gap: 4px; height: 140px; }
+  .bar { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; height: 100%; position: relative; min-width: 0; }
+  .bar span { display: block; border-radius: 4px 4px 0 0; min-height: 0; }
+  .bar .u { background: var(--blue); }
+  .bar .g { background: #91a7ff; }
+  .bar:hover::after { content: attr(data-tip); position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 6px; white-space: nowrap; background: #fff; color: var(--ink); font-size: 12px; padding: 6px 8px; border-radius: 8px; box-shadow: 0 6px 20px rgba(15,23,42,.15); z-index: 3; }
+  .axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .tools { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+  .tools input { height: 36px; flex: 1; min-width: 200px; border: 1px solid #dee2e6; border-radius: 10px; padding: 0 12px; font: inherit; background: #fff; }
+  .chip { height: 32px; padding: 0 12px; border-radius: 16px; border: 0; background: #fff; color: var(--muted); font-size: 13.5px; font-weight: 600; box-shadow: 0 0 0 1px var(--line); }
+  .chip.on { background: var(--blue); color: #fff; box-shadow: none; }
+  .tablewrap { background: var(--card); border-radius: 16px; overflow-x: auto; box-shadow: 0 4px 18px rgba(15, 23, 42, .05), 0 0 0 1px rgba(15, 23, 42, .04); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12.5px; background: #fafbfd; position: sticky; top: 0; }
+  td.num, th.num { text-align: right; }
+  tr:last-child td { border-bottom: 0; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 7px; font-size: 12.5px; font-weight: 600; }
+  .t-free { background: #f1f3f5; color: #495057; }
+  .t-pro { background: var(--blue-soft); color: var(--blue-ink); }
+  .t-trial { background: var(--green-soft); color: var(--green); }
+  .t-end { background: var(--orange-soft); color: var(--orange); }
+  .muted { color: var(--muted); }
+  .empty { padding: 30px; text-align: center; color: var(--muted); }
+  .fb { background: var(--card); border-radius: 14px; padding: 12px 16px; margin-bottom: 8px; box-shadow: 0 0 0 1px var(--line); }
+  .fb .h { font-size: 12.5px; color: var(--muted); margin-bottom: 4px; }
+  .fb .t { white-space: pre-wrap; word-break: break-word; }
+  .note { margin-top: 18px; color: var(--muted); font-size: 13px; }
+  .note a { color: var(--blue-ink); }
+  .gate { max-width: 440px; margin: 80px auto; background: #fff; border-radius: 20px; padding: 28px; text-align: center; box-shadow: 0 20px 60px rgba(15,23,42,.1); }
+  .gate h2 { margin: 0 0 8px; font-size: 20px; }
+  .gate p { color: var(--muted); margin: 0 0 18px; }
+  .gate a { display: inline-block; background: var(--blue); color: #fff; text-decoration: none; font-weight: 600; padding: 11px 18px; border-radius: 12px; }
+  @media (max-width: 600px) { header { padding: 10px 14px; } header .at { display: none; } .card .v { font-size: 26px; } }
+</style>
+</head>
+<body>
+<header><img src="logo.png" alt=""><h1>Учёт Lodl</h1><span class="at" id="at"></span><button class="btn" id="reload">Обновить</button></header>
+<main id="main"><div class="empty">Загружаю…</div></main>
+<script>
+(function () {
+  var main = document.getElementById('main');
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); };
+  var rub = function (n) { return (n || 0).toLocaleString('ru-RU') + ' ₽'; };
+  var tz = { timeZone: 'Europe/Moscow' };
+  var d = function (t) { return t ? new Date(t).toLocaleDateString('ru-RU', Object.assign({ day: 'numeric', month: 'short', year: '2-digit' }, tz)) : '—'; };
+  var dt = function (t) { return t ? new Date(t).toLocaleString('ru-RU', Object.assign({ day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }, tz)) : '—'; };
+  var ago = function (t) {
+    if (!t) return '—';
+    var m = (Date.now() - t) / 60000;
+    if (m < 90) return 'в последний час';
+    if (m < 60 * 24) return 'сегодня';
+    var n = Math.floor(m / 1440);
+    if (n === 1) return 'вчера';
+    return n + ' ' + (n % 10 === 1 && n % 100 !== 11 ? 'день' : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'дня' : 'дней') + ' назад';
+  };
+  var PLAN = { free: ['Базовый', 't-free'], month: ['Про, месяц', 't-pro'], year: ['Про, год', 't-pro'], trial: ['Две недели', 't-trial'], 'trial-ended': ['Две недели прошли', 't-end'], ended: ['Про закончился', 't-end'] };
+  var data = null, filter = 'all', query = '';
+
+  function gate(title, text) {
+    main.innerHTML = '<div class="gate"><h2>' + esc(title) + '</h2><p>' + esc(text) + '</p><a href="./">Открыть Lodl</a></div>';
+  }
+  function load() {
+    fetch('/api/admin', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) {
+      if (r.status === 401) { gate('Нужно войти', 'Войдите на главной странице Lodl под почтой владельца, а потом откройте эту страницу снова.'); return null; }
+      if (r.status === 404) { gate('Страница закрыта', 'Учёт открывается только под почтой владельца. Выйдите из аккаунта на главной странице и войдите под ней.'); return null; }
+      if (!r.ok) throw new Error('Сервер ответил ошибкой ' + r.status);
+      return r.json();
+    }).then(function (j) { if (j) { data = j; paint(); } }).catch(function (e) { gate('Не получилось загрузить', e.message || 'Проверьте интернет и нажмите «Обновить».'); });
+  }
+  function card(k, v, s) { return '<div class="card"><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="s">' + (s || '') + '</div></div>'; }
+  function paint() {
+    var x = data;
+    document.getElementById('at').textContent = 'Данные на ' + dt(x.at);
+    var payers = x.pro.month + x.pro.year;
+    var h = '<div class="cards">' +
+      card('Вошли по почте', x.users.total, '<span class="plus">+' + x.users.today + '</span> сегодня, <span class="plus">+' + x.users.week + '</span> за неделю, <span class="plus">+' + x.users.month + '</span> за месяц') +
+      card('Заходили', x.users.active7, 'за 7 дней, а за 30 дней <b>' + x.users.active30 + '</b>') +
+      card('Платят за Про', payers, 'по месяцам <b>' + x.pro.month + '</b>, за год <b>' + x.pro.year + '</b>' + (x.pro.canceled ? ', отменили продление <b>' + x.pro.canceled + '</b>' : '')) +
+      card('Бесплатные две недели', x.gifts.total, 'идут сейчас <b>' + x.gifts.active + '</b>, после них оплатили <b>' + x.gifts.paidAfter + '</b>') +
+      card('Выручка', rub(x.money.total), 'в этом месяце <b>' + rub(x.money.monthSum) + '</b>, оплат всего <b>' + x.money.payments + '</b>') +
+      card('Доски в аккаунтах', x.boards.listed, 'файлов в Материалах <b>' + (x.storage / 1048576).toFixed(1).replace('.', ',') + ' МБ</b>') +
+      '</div>';
+    // по дням
+    var max = Math.max(1, Math.max.apply(null, x.days.map(function (q) { return q.users + q.gifts; })));
+    h += '<h2>Последние 30 дней</h2><div class="chart"><div class="legend"><span><i style="background:#4c6ef5"></i>новые пользователи</span><span><i style="background:#91a7ff"></i>включили две недели</span></div><div class="bars">' +
+      x.days.map(function (q) {
+        var day = new Date(q.day + 'T12:00:00Z').toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' });
+        var tip = day + ': новых ' + q.users + ', две недели ' + q.gifts + (q.money ? ', оплаты ' + rub(q.money) : '');
+        return '<div class="bar" data-tip="' + esc(tip) + '"><span class="g" style="height:' + (q.gifts / max * 100) + '%"></span><span class="u" style="height:' + (q.users / max * 100) + '%"></span></div>';
+      }).join('') + '</div><div class="axis"><span>' + new Date(x.days[0].day + 'T12:00:00Z').toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) + '</span><span>сегодня</span></div></div>';
+    // список
+    h += '<h2>Пользователи</h2><div class="tools"><input id="q" type="search" placeholder="Поиск по почте" value="' + esc(query) + '">' +
+      [['all', 'Все'], ['pro', 'Платят'], ['trial', 'Две недели'], ['free', 'Базовый'], ['ended', 'Закончилось']].map(function (f) { return '<button class="chip' + (filter === f[0] ? ' on' : '') + '" data-f="' + f[0] + '">' + f[1] + '</button>'; }).join('') +
+      '</div><div class="tablewrap"><table><thead><tr><th>Почта</th><th>Пришёл</th><th>Последний раз</th><th>Тариф</th><th class="num">Досок</th><th class="num">Оплатил</th></tr></thead><tbody id="rows"></tbody></table></div>';
+    // сообщения
+    h += '<h2>Сообщения пользователей (' + x.feedbackTotal + ')</h2>' + (x.feedback.length ? x.feedback.map(function (f) {
+      return '<div class="fb"><div class="h">' + esc(f.kind) + ' · ' + dt(f.t) + (f.contact ? ' · ' + esc(f.contact) : '') + '</div><div class="t">' + esc(f.text) + '</div></div>';
+    }).join('') : '<div class="empty">Сообщений пока нет</div>');
+    h += '<p class="note">Здесь только те, кто вошёл по почте. Сколько людей открывает доску без входа, видно в <a href="https://doska-mira.goatcounter.com" target="_blank" rel="noopener">GoatCounter</a>.</p>';
+    main.innerHTML = h;
+    var qi = document.getElementById('q');
+    qi.addEventListener('input', function () { query = qi.value; rows(); });
+    main.querySelectorAll('.chip').forEach(function (b) { b.addEventListener('click', function () { filter = b.dataset.f; main.querySelectorAll('.chip').forEach(function (c) { c.classList.toggle('on', c === b); }); rows(); }); });
+    rows();
+  }
+  function rows() {
+    var q = query.trim().toLowerCase();
+    var list = data.list.filter(function (u) {
+      if (q && u.email.indexOf(q) < 0) return false;
+      if (filter === 'pro') return u.plan === 'month' || u.plan === 'year';
+      if (filter === 'trial') return u.plan === 'trial';
+      if (filter === 'free') return u.plan === 'free';
+      if (filter === 'ended') return u.plan === 'ended' || u.plan === 'trial-ended';
+      return true;
+    });
+    var tb = document.getElementById('rows');
+    if (!list.length) { tb.innerHTML = '<tr><td colspan="6" class="empty">Никого не нашлось</td></tr>'; return; }
+    tb.innerHTML = list.map(function (u) {
+      var p = PLAN[u.plan] || PLAN.free;
+      var extra = u.until && (u.plan === 'trial' || u.plan === 'month' || u.plan === 'year') ? ' <span class="muted">до ' + d(u.until) + (u.canceled ? ', без продления' : '') + '</span>' : '';
+      return '<tr><td>' + esc(u.email) + '</td><td>' + d(u.created) + '</td><td>' + ago(u.seen) + '</td><td><span class="tag ' + p[1] + '">' + p[0] + '</span>' + extra + '</td><td class="num">' + u.boards + '</td><td class="num">' + (u.paid ? rub(u.paid) : '—') + '</td></tr>';
+    }).join('');
+  }
+  document.getElementById('reload').addEventListener('click', load);
+  load();
+})();
+</script>
+</body>
+</html>

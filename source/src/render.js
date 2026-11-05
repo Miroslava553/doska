@@ -1,6 +1,6 @@
 // Геометрия и рисование объектов доски.
 import { getStroke } from 'perfect-freehand';
-import { compileMany } from './expr.js';
+import { compileMany, compileRows } from './expr.js';
 import { figSegments, drawFig, FIGS, figPrims, rightMarkPts } from './figs.js';
 import { SOLID_KINDS, solidView } from './solid.js';
 
@@ -324,32 +324,118 @@ export function hitItem(it, wx, wy, tol) {
 }
 
 // ---------- рисование ----------
+// ---------- графики ----------
 function niceStep(raw) {
   const p = Math.pow(10, Math.floor(Math.log10(raw))); const f = raw / p;
   return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * p;
 }
-function fmt(v) { const r = Math.round(v * 1e6) / 1e6; return String(r).replace('.', ','); }
-const GRAPH_COLORS = ['#1971c2', '#e03131', '#2f9e44', '#9c36b5', '#f08c00', '#0c8599'];
-const graphFnCache = new Map();
-function graphFns(expr) {
-  let c = graphFnCache.get(expr);
-  if (!c) { try { c = { fns: compileMany(expr) }; } catch (e) { c = { err: e.message }; } graphFnCache.set(expr, c); }
-  return c;
+function fmt(v) { const r = Math.round(v * 1e6) / 1e6; return String(r).replace('.', ',').replace('-', '−'); }
+// координата для подписи точки: два знака после запятой, без «−0»
+export function fmtCoord(v) { let r = Math.round(v * 100) / 100; if (Object.is(r, -0) || Math.abs(r) < 1e-9) r = 0; return String(r).replace('.', ',').replace('-', '−'); }
+export const GRAPH_COLORS = ['#1971c2', '#e03131', '#2f9e44', '#9c36b5', '#f08c00', '#0c8599', '#1e1e1e'];
+export const rowColor = (it, i) => (it.cols && it.cols[i]) || GRAPH_COLORS[i % 6];
+// Красивая запись для легенды: x^2 → x², >= → ≥, sqrt → √, * → ·
+export function prettyMath(s) {
+  return String(s).replace(/\^2(?![0-9.])/g, '²').replace(/\^3(?![0-9.])/g, '³').replace(/>=/g, '≥').replace(/<=/g, '≤')
+    .replace(/\bsqrt\b/g, '√').replace(/\bpi\b/g, 'π').replace(/\*/g, '·').replace(/(^|[\s(=,;])-/g, '$1−').replace(/ - /g, ' − ');
+}
+
+// Видимая область графика. «Одинаковый масштаб» (по умолчанию в новых графиках): клетка квадратная,
+// поэтому диапазон y считается из ширины по x и пропорций окна; окружность остаётся круглой при любом растяжении.
+export function graphView(it) {
+  let { xmin, xmax, ymin, ymax } = it;
+  if (it.gv === 2 && it.eq !== false) { const cy = (ymin + ymax) / 2, sp = ((xmax - xmin) * it.h) / it.w / 2; ymin = cy - sp; ymax = cy + sp; }
+  return { xmin, xmax, ymin, ymax };
+}
+// Строки графика (разбор кешируется по тексту; значения параметров подставляются при каждом расчёте)
+const rowCache = new Map();
+export function graphRows(it) {
+  if (it.gv !== 2) return legacyRows(it);
+  const src = it.expr || '';
+  let c = rowCache.get(src);
+  if (!c) {
+    const env = { p: {} }; c = { env, rows: compileRows(src, env) };
+    if (rowCache.size > 200) rowCache.delete(rowCache.keys().next().value);
+    rowCache.set(src, c);
+  }
+  c.env.p = it.par || {};
+  return c.rows;
+}
+// старые графики: всё в одной строке через «;», цвет первой — цвет ручки
+const legacyCache = new Map();
+function legacyRows(it) {
+  const src = it.expr || '';
+  let c = legacyCache.get(src);
+  if (!c) {
+    try {
+      const fns = compileMany(src); const rows = [];
+      fns.forEach((f, k) => { if (f.cond && k > 0 && fns[k - 1].cond) rows[rows.length - 1].pieces.push(f); else rows.push({ kind: 'fns', src: f.src, pieces: [f] }); });
+      c = { rows };
+    } catch (e) { c = { rows: [], err: e.message }; }
+    if (legacyCache.size > 100) legacyCache.delete(legacyCache.keys().next().value);
+    legacyCache.set(src, c);
+  }
+  return c.err ? [{ err: c.err, src }] : c.rows.map((r, i) => (i === 0 && it.color && it.color !== '#1e1e1e' ? { ...r, color: it.color } : r));
+}
+const colorOfRow = (it, r, i) => r.color || (it.gv === 2 ? rowColor(it, i) : GRAPH_COLORS[i % 6]);
+export function graphPars(rows) {
+  const out = [];
+  for (const r of rows) if (!r.err && r.pars) for (const p of r.pars) if (!out.includes(p)) out.push(p);
+  return out;
+}
+const safe = (f, ...a) => { try { const v = f(...a); return typeof v === 'number' ? v : NaN; } catch { return NaN; } };
+
+// деления: числа или доли π
+const PI_STEPS = [[1, 12], [1, 6], [1, 4], [1, 3], [1, 2], [1, 1], [2, 1], [4, 1], [5, 1], [10, 1], [20, 1], [50, 1], [100, 1]];
+function piStep(raw) { for (const [a, b] of PI_STEPS) if ((Math.PI * a) / b >= raw) return { v: (Math.PI * a) / b, a, b }; return { v: raw, a: raw / Math.PI, b: 1 }; }
+function gcd(a, b) { a = Math.abs(a); b = Math.abs(b); while (b) [a, b] = [b, a % b]; return a || 1; }
+function piLabel(v, den) {
+  let n = Math.round((v / Math.PI) * den), d = den; const g = gcd(n, d); n /= g; d /= g;
+  if (!n) return '0';
+  const num = n === 1 ? '' : n === -1 ? '−' : String(n).replace('-', '−');
+  return num + 'π' + (d > 1 ? '/' + d : '');
 }
 
 function drawGraph(ctx, it, scale) {
-  const { w, h } = it; const { xmin, xmax, ymin, ymax } = it;
+  const { w, h } = it; const { xmin, xmax, ymin, ymax } = graphView(it);
+  if (!(xmax > xmin) || !(ymax > ymin) || !(w > 0) || !(h > 0)) return;
   const X = (v) => ((v - xmin) / (xmax - xmin)) * w;
   const Y = (v) => h - ((v - ymin) / (ymax - ymin)) * h;
+  const v2 = it.gv === 2;
   ctx.fillStyle = 'rgba(255,255,255,0.92)';
   ctx.fillRect(0, 0, w, h);
   ctx.save();
   ctx.beginPath(); ctx.rect(0, 0, w, h); ctx.clip();
-  const sx = niceStep((xmax - xmin) / Math.max(2, w / 38)), sy = niceStep((ymax - ymin) / Math.max(2, h / 38)); // как в тетради: подпись у каждой единицы, если помещается
-  ctx.lineWidth = 1 / scale; ctx.strokeStyle = '#e3e8ef'; ctx.beginPath();
-  for (let v = Math.ceil(xmin / sx) * sx; v <= xmax; v += sx) { ctx.moveTo(X(v), 0); ctx.lineTo(X(v), h); }
-  for (let v = Math.ceil(ymin / sy) * sy; v <= ymax; v += sy) { ctx.moveTo(0, Y(v)); ctx.lineTo(w, Y(v)); }
-  ctx.stroke();
+  // как в тетради: подпись у каждой единицы, если помещается
+  const pi = v2 && it.xpi ? piStep((xmax - xmin) / Math.max(2, w / 46)) : null;
+  let sx = pi ? pi.v : niceStep((xmax - xmin) / Math.max(2, w / 38)); const sy = niceStep((ymax - ymin) / Math.max(2, h / 38));
+  // длинные подписи (100000, 0,0005) не налезают друг на друга: деление крупнее, пока подпись помещается
+  if (!pi) {
+    ctx.font = `12px ${FONT}`;
+    for (let k = 0; k < 12; k++) {
+      const wide = Math.max(ctx.measureText(fmt(Math.ceil(xmin / sx) * sx)).width, ctx.measureText(fmt(Math.floor(xmax / sx) * sx)).width, ctx.measureText(fmt(sx)).width);
+      if (wide + 8 <= (sx / (xmax - xmin)) * w) break;
+      { const p = Math.pow(10, Math.floor(Math.log10(sx) + 1e-9)), f = Math.round(sx / p); sx = (f < 2 ? 2 : f < 5 ? 5 : 10) * p; }
+    }
+  }
+  const ticks = (a, b, s) => { const out = []; const k0 = Math.ceil(a / s), k1 = Math.floor(b / s); if (k1 - k0 > 4000) return out; for (let k = k0; k <= k1; k++) out.push(k * s); return out; };
+  if (!(v2 && it.nogrid)) {
+    // мелкая сетка (в новых графиках): пятая часть деления, если клетки не слишком мелкие
+    if (v2 && !pi) {
+      const m = (s) => (String(Math.round(s / Math.pow(10, Math.floor(Math.log10(s))))) === '2' ? s / 4 : s / 5);
+      const mx = m(sx), my = m(sy);
+      if ((mx / (xmax - xmin)) * w * scale >= 7) {
+        ctx.lineWidth = 1 / scale; ctx.strokeStyle = '#f1f3f5'; ctx.beginPath();
+        for (const v of ticks(xmin, xmax, mx)) { ctx.moveTo(X(v), 0); ctx.lineTo(X(v), h); }
+        for (const v of ticks(ymin, ymax, my)) { ctx.moveTo(0, Y(v)); ctx.lineTo(w, Y(v)); }
+        ctx.stroke();
+      }
+    }
+    ctx.lineWidth = 1 / scale; ctx.strokeStyle = '#e3e8ef'; ctx.beginPath();
+    for (const v of ticks(xmin, xmax, sx)) { ctx.moveTo(X(v), 0); ctx.lineTo(X(v), h); }
+    for (const v of ticks(ymin, ymax, sy)) { ctx.moveTo(0, Y(v)); ctx.lineTo(w, Y(v)); }
+    ctx.stroke();
+  }
   // оси
   const ax = Math.max(0, Math.min(h, Y(0))), ay = Math.max(0, Math.min(w, X(0)));
   ctx.strokeStyle = '#495057'; ctx.lineWidth = 1.5 / scale; ctx.beginPath();
@@ -359,28 +445,52 @@ function drawGraph(ctx, it, scale) {
   ctx.beginPath(); ctx.moveTo(ay, 0); ctx.lineTo(ay - 4, 9); ctx.lineTo(ay + 4, 9); ctx.fill();
   ctx.font = `12px ${FONT}`; ctx.fillStyle = '#6c757d';
   ctx.textAlign = 'center'; ctx.textBaseline = 'top';
-  for (let v = Math.ceil(xmin / sx) * sx; v <= xmax; v += sx) if (Math.abs(v) > sx / 2 && X(v) > 12 && X(v) < w - 16) ctx.fillText(fmt(v), X(v), Math.min(h - 14, ax + 3));
+  for (const v of ticks(xmin, xmax, sx)) if (Math.abs(v) > sx / 2 && X(v) > 12 && X(v) < w - 16) ctx.fillText(pi ? piLabel(v, pi.b) : fmt(v), X(v), Math.min(h - 14, ax + 3));
   ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
-  for (let v = Math.ceil(ymin / sy) * sy; v <= ymax; v += sy) if (Math.abs(v) > sy / 2 && Y(v) > 12 && Y(v) < h - 10) ctx.fillText(fmt(v), Math.max(24, ay - 4), Y(v));
+  for (const v of ticks(ymin, ymax, sy)) if (Math.abs(v) > sy / 2 && Y(v) > 12 && Y(v) < h - 10) ctx.fillText(fmt(v), Math.max(24, ay - 4), Y(v));
+  // 0 в начале координат
+  if (v2 && X(0) > 10 && X(0) < w - 10 && Y(0) > 10 && Y(0) < h - 14) { ctx.textAlign = 'right'; ctx.textBaseline = 'top'; ctx.fillText('0', X(0) - 4, Y(0) + 3); }
   ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
   ctx.font = `italic 13px ${FONT}`; ctx.fillStyle = '#495057';
-  ctx.fillText('x', w - 12, ax - 8); ctx.fillText('y', ay + 7, 12);
+  const nx = (v2 && it.axx) || 'x', ny = (v2 && it.axy) || 'y';
+  ctx.textAlign = 'right'; ctx.fillText(nx, w - 4, ax - 8); ctx.textAlign = 'left';
+  ctx.fillText(ny, ay + 7, 12);
   // кривые
-  const g = graphFns(it.expr || '');
-  if (g.err) {
-    ctx.fillStyle = '#e03131'; ctx.font = `14px ${FONT}`; ctx.fillText('Ошибка: ' + g.err, 8, h - 10);
-  } else {
-    const n = Math.max(200, Math.min(2500, Math.round(w * scale)));
-    const colorOf = []; { let c = -1; g.fns.forEach((f, k) => { if (!(f.cond && k > 0 && g.fns[k - 1].cond)) c++; colorOf[k] = c; }); }
-    const col = (k) => (colorOf[k] === 0 && it.color && it.color !== '#1e1e1e' ? it.color : GRAPH_COLORS[colorOf[k] % GRAPH_COLORS.length]);
-    g.fns.forEach((f, k) => {
-      ctx.strokeStyle = col(k);
-      ctx.lineWidth = 2.5 / Math.sqrt(scale) ; ctx.lineJoin = 'round'; ctx.beginPath();
+  const rows = graphRows(it);
+  if (!v2 && rows.length === 1 && rows[0].err) {
+    ctx.fillStyle = '#e03131'; ctx.font = `14px ${FONT}`; ctx.fillText('Ошибка: ' + rows[0].err, 8, h - 10);
+    ctx.restore(); ctx.strokeStyle = '#ced4da'; ctx.lineWidth = 1 / scale; ctx.strokeRect(0, 0, w, h); return;
+  }
+  const n = Math.max(200, Math.min(2500, Math.round(w * scale)));
+  const lw = (v2 ? it.lw || 2.5 : 2.5) / Math.sqrt(Math.max(scale, 0.05));
+  const view = { xmin, xmax, ymin, ymax };
+  const dots = [];
+  rows.forEach((r, i) => {
+    if (r.err || r.empty || (it.off && it.off[i])) return;
+    const col = colorOfRow(it, r, i);
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = lw; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    if (r.kind === 'pt') {
+      const [px, py] = r.at(); if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+      dots.push({ x: px, y: py, col, fill: true, label: (r.name ? r.name : '') + '(' + fmtCoord(px) + '; ' + fmtCoord(py) + ')', big: true });
+      return;
+    }
+    for (const f of r.pieces) {
+      if (f.kind === 'imp') { drawImplicit(ctx, f, it, view, X, Y, scale); continue; }
+      if (f.kind === 'ineq') { drawRegion(ctx, f, it, view, X, Y, scale, col, lw); continue; }
+      if (f.kind === 'vline') {
+        const at = safe(f.at); if (!Number.isFinite(at)) continue;
+        ctx.beginPath(); let pen = false;
+        for (let k = 0; k <= 400; k++) {
+          const yv = ymin + ((ymax - ymin) * k) / 400;
+          if (f.cond && !f.cond(at, yv)) { pen = false; continue; }
+          if (pen) ctx.lineTo(X(at), Y(yv)); else ctx.moveTo(X(at), Y(yv)); pen = true;
+        }
+        ctx.stroke(); continue;
+      }
+      ctx.beginPath();
       let pen = false, prevY = 0;
-      if (f.kind === 'imp') { drawImplicit(ctx, f, it, X, Y, scale); return; }
-      for (let i = 0; i <= n; i++) {
-        const xv = xmin + ((xmax - xmin) * i) / n; let yv;
-        try { yv = f.fn(xv); } catch { yv = NaN; }
+      for (let k = 0; k <= n; k++) {
+        const xv = xmin + ((xmax - xmin) * k) / n; const yv = safe(f.fn, xv);
         if (f.cond && !f.cond(xv, yv)) { pen = false; continue; } // кусочная: только где выполнено условие
         const py = Y(yv);
         if (!Number.isFinite(py) || Math.abs(py) > h * 50) { pen = false; continue; }
@@ -389,15 +499,50 @@ function drawGraph(ctx, it, scale) {
         pen = true; prevY = py;
       }
       ctx.stroke();
-    });
-    ctx.font = `14px ${FONT}`;
-    g.fns.forEach((f, k) => {
-      ctx.fillStyle = 'rgba(255,255,255,0.85)';
-      const label = f.kind === 'imp' ? f.src : 'y = ' + f.src.replace(/^\s*y\s*=\s*/i, '');
-      const tw = ctx.measureText(label).width;
-      ctx.fillRect(6, 6 + k * 20, tw + 8, 19);
-      ctx.fillStyle = col(k);
-      ctx.fillText(label, 10, 21 + k * 20);
+      // концы кусков: закрашенная точка — конец входит, пустая — не входит
+      if (v2 && f.ends) for (const e of f.ends) {
+        const xe = safe(e.at); const ye = safe(f.fn, xe);
+        if (Number.isFinite(xe) && Number.isFinite(ye)) dots.push({ x: xe, y: ye, col, fill: e.incl, end: true });
+      }
+    }
+  });
+  // особые точки: нули, вершины, пересечения
+  if (v2 && it.pois) for (const p of graphPois(it)) dots.push({ x: p.x, y: p.y, col: p.col, fill: true, label: '(' + fmtCoord(p.x) + '; ' + fmtCoord(p.y) + ')' });
+  const dr = Math.max(3.2, lw * 1.55);
+  ctx.font = `13px ${FONT}`; ctx.textBaseline = 'bottom'; ctx.textAlign = 'left';
+  // подписи не налезают друг на друга: пробуем справа сверху, слева сверху, справа снизу, слева снизу; не влезла — только точка
+  const placed = [];
+  dots.sort((a, b) => (b.big ? 1 : 0) - (a.big ? 1 : 0));
+  for (const d of dots) {
+    const px = X(d.x), py = Y(d.y);
+    if (px < -20 || px > w + 20 || py < -20 || py > h + 20) continue;
+    ctx.beginPath(); ctx.arc(px, py, d.big ? dr * 1.15 : dr, 0, Math.PI * 2);
+    ctx.fillStyle = d.fill ? d.col : '#fff'; ctx.fill();
+    ctx.lineWidth = Math.max(1.5, lw * 0.7); ctx.strokeStyle = d.col; ctx.stroke();
+    if (d.label) {
+      const tw = ctx.measureText(d.label).width;
+      const spot = [[px + 7, py - 5], [px - 7 - tw, py - 5], [px + 7, py + 18], [px - 7 - tw, py + 18]].find(([lx, ty]) =>
+        lx >= 1 && lx + tw <= w - 1 && ty - 13 >= 1 && ty <= h - 1 && !placed.some((q) => lx < q[2] && lx + tw > q[0] && ty - 13 < q[3] && ty > q[1]));
+      if (!spot) continue;
+      const [lx, ty] = spot; placed.push([lx - 2, ty - 14, lx + tw + 2, ty + 1]);
+      ctx.lineWidth = 3.5 / Math.sqrt(Math.max(scale, 0.05)); ctx.strokeStyle = 'rgba(255,255,255,.95)'; ctx.lineJoin = 'round';
+      ctx.strokeText(d.label, lx, ty); ctx.fillStyle = d.big ? d.col : '#343a40'; ctx.fillText(d.label, lx, ty);
+    }
+  }
+  ctx.textBaseline = 'alphabetic';
+  // подписи функций слева вверху
+  if (!(v2 && it.nolegend)) {
+    ctx.font = `14px ${FONT}`; let k = 0;
+    rows.forEach((r, i) => {
+      if (r.err || r.empty || r.kind === 'pt' || (it.off && it.off[i])) return;
+      for (const f of r.pieces) {
+        const s = f.src.trim();
+        const label = prettyMath(f.kind === 'fn' && !/^\s*(y|[a-z]\s*\(\s*[xt]\s*\))\s*=/i.test(s) ? 'y = ' + s : s);
+        const tw = ctx.measureText(label).width;
+        ctx.fillStyle = 'rgba(255,255,255,0.85)'; ctx.fillRect(6, 6 + k * 20, tw + 8, 19);
+        ctx.fillStyle = colorOfRow(it, r, i); ctx.fillText(label, 10, 21 + k * 20); k++;
+        if (k > 12) return;
+      }
     });
   }
   ctx.restore();
@@ -406,16 +551,17 @@ function drawGraph(ctx, it, scale) {
 
 // Кривая F(x, y) = 0 (окружность, эллипс…): «бегущие квадраты» по сетке, отрезки кешируем
 const impCache = new Map();
-function drawImplicit(ctx, f, it, X, Y, scale) {
-  const { xmin, xmax, ymin, ymax, w, h } = it;
+function drawImplicit(ctx, f, it, view, X, Y, scale) {
+  const { xmin, xmax, ymin, ymax } = view; const { w, h } = it;
   const nx = Math.max(60, Math.min(420, Math.round((w * scale) / 3))), ny = Math.max(45, Math.min(320, Math.round((h * scale) / 3)));
-  const key = [f.src, xmin, xmax, ymin, ymax, nx, ny].join('|');
+  const pk = f.pars && f.pars.length ? JSON.stringify(f.pars.map((p) => it.par && it.par[p])) : '';
+  const key = [f.src, pk, xmin, xmax, ymin, ymax, nx, ny].join('|');
   let segs = impCache.get(key);
   if (!segs) {
     segs = [];
     const dx = (xmax - xmin) / nx, dy = (ymax - ymin) / ny;
     const V = new Float64Array((nx + 1) * (ny + 1));
-    for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) { let v; try { v = f.F(xmin + i * dx, ymin + j * dy); } catch { v = NaN; } V[j * (nx + 1) + i] = v; }
+    for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) V[j * (nx + 1) + i] = safe(f.F, xmin + i * dx, ymin + j * dy);
     const lerp = (a, b, va, vb) => a + (b - a) * (va / (va - vb));
     for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const x0 = xmin + i * dx, y0 = ymin + j * dy, x1 = x0 + dx, y1 = y0 + dy;
@@ -442,6 +588,165 @@ function drawImplicit(ctx, f, it, X, Y, scale) {
   ctx.beginPath();
   for (let k = 0; k < segs.length; k += 4) { ctx.moveTo(X(segs[k]), Y(segs[k + 1])); ctx.lineTo(X(segs[k + 2]), Y(segs[k + 3])); }
   ctx.lineCap = 'round'; ctx.stroke();
+}
+
+// Неравенство: закрашенная область и граница (пунктир — граница не входит)
+const regCache = new Map();
+function drawRegion(ctx, f, it, view, X, Y, scale, col, lw) {
+  const { xmin, xmax, ymin, ymax } = view; const { w, h } = it;
+  const dash = (on) => ctx.setLineDash(on ? [lw * 3.2, lw * 2.4] : []);
+  ctx.save();
+  if (f.mode === 'x') {
+    let lo = xmin - 1, hi = xmax + 1;
+    for (const b of f.bounds) { const v = safe(b.fn, 0, 0); if (b.side === 'lo') lo = Math.max(lo, v); else hi = Math.min(hi, v); }
+    if (hi > lo) {
+      ctx.globalAlpha = 0.18; ctx.fillRect(X(Math.max(lo, xmin)), 0, X(Math.min(hi, xmax)) - X(Math.max(lo, xmin)), h); ctx.globalAlpha = 1;
+      for (const b of f.bounds) { const v = safe(b.fn, 0, 0); if (v >= lo - 1e-12 && v <= hi + 1e-12 && v > xmin && v < xmax) { dash(b.strict); ctx.beginPath(); ctx.moveTo(X(v), 0); ctx.lineTo(X(v), h); ctx.stroke(); } }
+    }
+  } else if (f.mode === 'y') {
+    const N = Math.max(120, Math.min(1200, Math.round((w * scale) / 1.5))), dx = (xmax - xmin) / N;
+    const lo = new Float64Array(N + 1), hi = new Float64Array(N + 1), ok = new Uint8Array(N + 1);
+    for (let k = 0; k <= N; k++) {
+      const x = xmin + k * dx; let a = -Infinity, b = Infinity;
+      for (const q of f.bounds) { const v = safe(q.fn, x, 0); if (Number.isNaN(v)) { a = Infinity; break; } if (q.side === 'lo') a = Math.max(a, v); else b = Math.min(b, v); }
+      lo[k] = a; hi[k] = b; ok[k] = b > a && (!f.cond || f.cond(x, Math.max(ymin, Math.min(ymax, (Math.max(a, ymin) + Math.min(b, ymax)) / 2)))) ? 1 : 0;
+    }
+    ctx.globalAlpha = 0.18; ctx.beginPath();
+    const cw = w / N;
+    for (let k = 0; k <= N; k++) {
+      if (!ok[k]) continue;
+      const t = Y(Math.min(hi[k], ymax + 1)), bt = Y(Math.max(lo[k], ymin - 1));
+      if (bt > t) ctx.rect(X(xmin + k * dx) - cw / 2, Math.max(-2, t), cw + 0.6 / scale, Math.min(h + 2, bt) - Math.max(-2, t));
+    }
+    ctx.fill(); ctx.globalAlpha = 1;
+    for (const q of f.bounds) {
+      dash(q.strict); ctx.beginPath(); let pen = false, prev = 0;
+      for (let k = 0; k <= N; k++) {
+        const x = xmin + k * dx, v = safe(q.fn, x, 0), act = q.side === 'lo' ? lo[k] : hi[k];
+        const on = ok[k] && Number.isFinite(v) && Math.abs(v - act) <= Math.abs(v) * 1e-9 + 1e-12;
+        const py = Y(v);
+        if (!on || Math.abs(py) > h * 50 || (pen && Math.abs(py - prev) > h * 2)) { pen = false; if (!on) continue; }
+        if (pen) ctx.lineTo(X(x), py); else ctx.moveTo(X(x), py); pen = true; prev = py;
+      }
+      ctx.stroke();
+    }
+  } else {
+    // общий случай: клетки, где неравенство выполнено, сливаем в полосы
+    const nx = Math.max(60, Math.min(360, Math.round((w * scale) / 3))), ny = Math.max(45, Math.min(280, Math.round((h * scale) / 3)));
+    const pk = f.pars && f.pars.length ? JSON.stringify(f.pars.map((p) => it.par && it.par[p])) : '';
+    const key = [f.src, pk, xmin, xmax, ymin, ymax, nx, ny].join('|');
+    let runs = regCache.get(key);
+    if (!runs) {
+      runs = []; const dx = (xmax - xmin) / nx, dy = (ymax - ymin) / ny;
+      for (let j = 0; j < ny; j++) {
+        const y = ymin + (j + 0.5) * dy; let start = -1;
+        for (let i = 0; i <= nx; i++) {
+          const x = xmin + (i + 0.5) * dx;
+          const inside = i < nx && f.test(x, y) && (!f.cond || f.cond(x, y));
+          if (inside && start < 0) start = i;
+          if (!inside && start >= 0) { runs.push(start, i, j); start = -1; }
+        }
+      }
+      if (regCache.size > 40) regCache.delete(regCache.keys().next().value);
+      regCache.set(key, runs);
+    }
+    const cw = w / nx, ch = h / ny;
+    ctx.globalAlpha = 0.18; ctx.beginPath();
+    for (let k = 0; k < runs.length; k += 3) ctx.rect(runs[k] * cw, h - (runs[k + 2] + 1) * ch, (runs[k + 1] - runs[k]) * cw, ch + 0.4 / scale);
+    ctx.fill(); ctx.globalAlpha = 1;
+    if (f.F) { dash(f.strict); drawImplicit(ctx, { F: f.F, src: f.src + '#b', pars: f.pars, cond: f.cond }, it, view, X, Y, scale); }
+  }
+  ctx.restore();
+}
+
+// Особые точки графиков y = f(x) в видимой области: нули, вершины (максимумы и минимумы),
+// пересечение с осью y и пересечения графиков между собой. Ищем перебором с уточнением делением пополам.
+const poiCache = new Map();
+export function graphPois(it) {
+  const rows = graphRows(it); const v = graphView(it);
+  const key = [it.expr, JSON.stringify(it.par || {}), JSON.stringify(it.off || []), JSON.stringify(it.cols || []), v.xmin, v.xmax, v.ymin, v.ymax].join('|');
+  const hit = poiCache.get(key); if (hit) return hit;
+  const N = 600, out = [];
+  const fns = [];
+  rows.forEach((r, i) => {
+    if (r.err || r.empty || r.kind !== 'fns' || (it.off && it.off[i])) return;
+    for (const f of r.pieces) if (f.kind === 'fn') fns.push({ f, col: colorOfRow(it, r, i) });
+  });
+  const span = v.xmax - v.xmin, ys = v.ymax - v.ymin;
+  const xs = Array.from({ length: N + 1 }, (_, k) => v.xmin + (span * k) / N);
+  const val = (o, x) => { const y = safe(o.f.fn, x); return o.f.cond && !o.f.cond(x, y) ? NaN : y; };
+  const inView = (x, y) => x >= v.xmin && x <= v.xmax && y >= v.ymin && y <= v.ymax;
+  const add = (x, y, col) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !inView(x, y)) return;
+    if (Math.abs(x) < span * 1e-9) x = 0; if (Math.abs(y) < ys * 1e-9) y = 0;
+    if (out.some((p) => Math.abs(p.x - x) < span * 2e-3 && Math.abs(p.y - y) < ys * 2e-3)) return;
+    out.push({ x, y, col });
+  };
+  const root = (g, a, b) => { let ga = g(a); for (let k = 0; k < 60; k++) { const m = (a + b) / 2, gm = g(m); if (!Number.isFinite(gm)) return NaN; if ((gm < 0) === (ga < 0)) { a = m; ga = gm; } else b = m; } return (a + b) / 2; };
+  const zeroCross = (g, col, yOf) => {
+    let pa = g(xs[0]);
+    for (let k = 1; k <= N; k++) {
+      const pb = g(xs[k]);
+      if (Number.isFinite(pa) && Number.isFinite(pb) && (pa === 0 || (pa < 0) !== (pb < 0))) {
+        const x = pa === 0 ? xs[k - 1] : root(g, xs[k - 1], xs[k]);
+        const y = yOf(x);
+        // настоящий ноль, а не разрыв (у 1/x знак меняется скачком)
+        if (Number.isFinite(y) && Math.abs(g(x)) < ys * 1e-3) add(x, y, col);
+      }
+      pa = pb;
+    }
+  };
+  for (const o of fns) {
+    const g = (x) => val(o, x);
+    zeroCross(g, o.col, () => 0);
+    if (0 >= v.xmin && 0 <= v.xmax) add(0, g(0), o.col);
+    // вершины: производная меняет знак; уточняем золотым сечением
+    const Y = xs.map(g);
+    for (let k = 1; k < N; k++) {
+      const a = Y[k - 1], b = Y[k], c = Y[k + 1];
+      if (![a, b, c].every(Number.isFinite)) continue;
+      const isMax = b > a && b >= c, isMin = b < a && b <= c;
+      if (!isMax && !isMin) continue;
+      if (Math.abs(b - a) > ys * 0.5 || Math.abs(b - c) > ys * 0.5) continue; // острый пик у разрыва
+      let lo = xs[k - 1], hi = xs[k + 1]; const s = isMax ? -1 : 1, r = (Math.sqrt(5) - 1) / 2;
+      for (let t = 0; t < 60; t++) { const m1 = hi - r * (hi - lo), m2 = lo + r * (hi - lo); if (s * g(m1) < s * g(m2)) hi = m2; else lo = m1; }
+      const x = (lo + hi) / 2; add(x, g(x), o.col);
+    }
+  }
+  for (let i = 0; i < fns.length; i++) for (let j = i + 1; j < fns.length; j++) {
+    const A = fns[i], B = fns[j];
+    if (A.col === B.col && A.f.cond && B.f.cond) continue; // куски одной кусочной функции
+    zeroCross((x) => val(A, x) - val(B, x), '#495057', (x) => val(A, x));
+  }
+  const res = out.slice(0, 40);
+  if (poiCache.size > 60) poiCache.delete(poiCache.keys().next().value);
+  poiCache.set(key, res);
+  return res;
+}
+
+// Точка графика под курсором (локальные координаты объекта): особая точка, точка из списка или точка на кривой
+export function graphPick(it, lx, ly, tol) {
+  const { w, h } = it; const v = graphView(it);
+  if (lx < 0 || ly < 0 || lx > w || ly > h) return null;
+  const X = (q) => ((q - v.xmin) / (v.xmax - v.xmin)) * w, Y = (q) => h - ((q - v.ymin) / (v.ymax - v.ymin)) * h;
+  const xv = v.xmin + (lx / w) * (v.xmax - v.xmin);
+  const rows = graphRows(it);
+  let best = null, bd = tol;
+  const consider = (x, y, col, kind) => { const d = Math.hypot(X(x) - lx, Y(y) - ly); if (d < bd) { bd = d; best = { x, y, col, kind }; } };
+  rows.forEach((r, i) => {
+    if (r.err || r.empty || r.kind !== 'pt' || (it.off && it.off[i])) return;
+    const [px, py] = r.at(); consider(px, py, colorOfRow(it, r, i), 'pt');
+  });
+  for (const p of graphPois(it)) consider(p.x, p.y, p.col, 'poi');
+  if (best) return { ...best, lx: X(best.x), ly: Y(best.y) };
+  rows.forEach((r, i) => {
+    if (r.err || r.empty || r.kind !== 'fns' || (it.off && it.off[i])) return;
+    for (const f of r.pieces) {
+      if (f.kind === 'fn') { const y = safe(f.fn, xv); if (Number.isFinite(y) && (!f.cond || f.cond(xv, y))) consider(xv, y, colorOfRow(it, r, i), 'curve'); }
+      else if (f.kind === 'vline') { const at = safe(f.at); const yv = v.ymax - (ly / h) * (v.ymax - v.ymin); if (Number.isFinite(at)) consider(at, yv, colorOfRow(it, r, i), 'curve'); }
+    }
+  });
+  return best ? { ...best, lx: X(best.x), ly: Y(best.y) } : null;
 }
 
 // значок прямого угла у вершины, где угол 90° (±1,5°)
@@ -684,10 +989,10 @@ export function drawBackground(ctx, bg, view, w, h) {
   ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
   if (bg === 'plain') return;
   const step = GRID * view.z;
-  // Клетка всегда одного размера. Когда отдаляешься и клетки становятся мельче ~7 px, их не видно —
-  // тогда проступает каждая 5-я линия (крупная клетка 5×5), ещё дальше — каждая 25-я. Переход плавный.
-  const vis = (s) => (s < 7 ? 0 : Math.min(1, (s - 7) / 10));
-  const levels = [1, 5, 25, 125].filter((L) => vis(step * L) > 0);
+  // Клетка — как на настоящем листе: отдаляешься, и она уменьшается вместе со всем, что нарисовано.
+  // Так видно, насколько далеко ушёл масштаб. Мельче 12 точек клетки бледнеют, мельче 2 точек (масштаб ниже 5%) их нет совсем.
+  const vis = (s) => Math.max(0, Math.min(1, (s - 2) / 10));
+  const levels = [1].filter((L) => vis(step * L) > 0);
   if (!levels.length) return;
   const L0 = levels[0];
   ctx.save();

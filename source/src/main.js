@@ -5,8 +5,8 @@ import {
   decodePts, encodePts, strokeOptions, outlinePath, paintInk, localBox, worldBox, geomWorldBox, itemTransform, hitItem, distSeg,
   drawItem, drawBackground, setAsyncLoad, setShadePeek, fitShade, hwGeom, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf, rotCenter, bakeShape, SCALE_BAKED,
   CUTTABLE, inCuts, scaleCuts, rotPt,
+  graphRows, graphPars, graphView, graphPick, graphPois, fmtCoord, GRAPH_COLORS,
 } from './render.js';
-import { compileMany } from './expr.js';
 import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, solidEdges, regularSolid } from './solid.js';
 import { StrokeBuilder, oneEuro } from './pen.js';
 import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, moveCursor, vertexCursor } from './cursors.js';
@@ -35,6 +35,7 @@ const el = (tag, attrs = {}, ...kids) => {
 };
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const fmtNum = (v) => String(+(+v).toPrecision(10)).replace('.', ',');
 const LS = {
   get(k, d) { try { const v = localStorage.getItem('doska:' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem('doska:' + k, JSON.stringify(v)); } catch {} },
@@ -58,12 +59,17 @@ const COLORS = ['#1e1e1e', '#1971c2', '#e03131', '#2f9e44', '#f08c00', '#9c36b5'
 const COLOR_NAMES = ['Чёрный', 'Синий', 'Красный', 'Зелёный', 'Оранжевый', 'Фиолетовый', 'Жёлтый', 'Белый'];
 // Толщина: ползунок + готовые значения
 const SIZE_CFG = {
-  pen: { min: 0.5, max: 20, step: 0.5, presets: [1, 1.5, 2, 3, 4, 5, 6, 8, 10, 14], def: 3.5, name: 'Толщина' },
-  hl: { min: 4, max: 64, step: 1, presets: [6, 10, 14, 20, 28, 36, 48], def: 20, name: 'Толщина маркера' },
-  eraser: { min: 4, max: 120, step: 1, presets: [8, 12, 20, 28, 40, 56, 80], def: 28, name: 'Размер ластика' },
-  shape: { min: 0.5, max: 20, step: 0.5, presets: [1, 2, 3, 4, 6, 8, 12], def: 3.5, name: 'Толщина фигур' },
-  text: { min: 10, max: 96, step: 1, presets: [14, 18, 22, 28, 36, 48, 64], def: 28, name: 'Размер текста' },
+// Ползунок идёт по «логарифму»: тонкие значения подбираются так же точно, как раньше, а наверху хватает места для очень толстых
+  pen: { min: 0.5, max: 60, step: 0.5, presets: [1, 1.5, 2, 3, 4, 5, 6, 8, 10, 14, 20, 30], def: 3.5, name: 'Толщина' },
+  hl: { min: 4, max: 160, step: 1, presets: [6, 10, 14, 20, 28, 36, 48, 72, 100], def: 20, name: 'Толщина маркера' },
+  eraser: { min: 4, max: 300, step: 1, presets: [8, 12, 20, 28, 40, 56, 80, 120, 200], def: 28, name: 'Размер ластика' },
+  shape: { min: 0.5, max: 60, step: 0.5, presets: [1, 2, 3, 4, 6, 8, 12, 20, 30], def: 3.5, name: 'Толщина фигур' },
+  text: { min: 10, max: 200, step: 1, presets: [14, 18, 22, 28, 36, 48, 64, 96, 128], def: 28, name: 'Размер текста' },
 };
+// Масштаб: от 2% до 1200%. «Показать всё» может отдалить и дальше, если лист больше: тогда нижний предел — текущий масштаб.
+const ZMIN = 0.02, ZMAX = 12;
+// шаги кнопок «−/+» и колеса мыши с Ctrl: внизу мельче (каждый шаг заметен одинаково), от 50% до 400% — по 10%, выше — по 25%
+const ZSTEPS = (() => { const a = [2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 35, 40, 45]; for (let v = 50; v < 400; v += 10) a.push(v); for (let v = 400; v <= 1200; v += 25) a.push(v); return a; })();
 const OLD_SIZES = { pen: [2, 3.5, 6], hl: [12, 20, 32], eraser: [12, 28, 56], text: [20, 28, 40] };
 const LINE_TOOLS = new Set(['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin']);
 // стрелки: обычная, пунктирная, двусторонняя (двояковыпуклая линза), с обратными концами (двояковогнутая линза)
@@ -818,14 +824,14 @@ function startBoard(room) {
     sendView();
   }
   function zoomAt(sx, sy, factor) {
-    const z = clamp(S.view.z * factor, 0.08, 12);
+    const z = clamp(S.view.z * factor, Math.min(ZMIN, S.view.z), ZMAX); // ниже 2% можно оказаться только через «Показать всё», и оттуда не отдаляем дальше
     const [wx, wy] = toWorld(sx, sy);
     S.view.z = z; S.view.x = sx - wx * z; S.view.y = sy - wy * z;
     viewChanged(); renderZoom();
   }
   function fitRect(x0, y0, x1, y1, maxZ = 2) {
     const pad = 60;
-    const z = clamp(Math.min((W - pad * 2) / Math.max(1, x1 - x0), (H - pad * 2 - 60) / Math.max(1, y1 - y0)), 0.08, maxZ);
+    const z = clamp(Math.min((W - pad * 2) / Math.max(1, x1 - x0), (H - pad * 2 - 60) / Math.max(1, y1 - y0)), 1e-4, maxZ); // весь лист виден всегда, даже если для этого нужно меньше 2%
     S.view.z = z; S.view.x = W / 2 - ((x0 + x1) / 2) * z; S.view.y = (H + 50) / 2 - ((y0 + y1) / 2) * z;
   }
   function fitContent() {
@@ -1002,7 +1008,7 @@ function startBoard(room) {
   // box — рамка добавленного (картинка): если не помещается при моём масштабе — отдаляемся ровно настолько, чтобы поместилась.
   function followCenter(x, y, box) {
     let z = S.view.z;
-    if (box) { const fit = Math.min((W - 160) / Math.max(1, box[2] - box[0]), (H - 260) / Math.max(1, box[3] - box[1])); if (fit < z) z = clamp(fit, 0.08, 12); }
+    if (box) { const fit = Math.min((W - 160) / Math.max(1, box[2] - box[0]), (H - 260) / Math.max(1, box[3] - box[1])); if (fit < z) z = clamp(fit, ZMIN, ZMAX); }
     const [sx, sy] = toScreen(x, y);
     const inCenter = sx > W * 0.3 && sx < W * 0.7 && sy > H * 0.3 && sy < H * 0.7;
     if (inCenter && z === S.view.z && !box) return;
@@ -1034,14 +1040,14 @@ function startBoard(room) {
     if (a && a.page === S.page && Date.now() - a.t < 15000 && isFinite(a.x0)) {
       cx = (a.x0 + a.x1) / 2; cy = (a.y0 + a.y1) / 2;
       const fit = Math.min((W - 120) / Math.max(1, a.x1 - a.x0), (H - 220) / Math.max(1, a.y1 - a.y0));
-      if (fit < z) z = clamp(fit, 0.08, 12);
+      if (fit < z) z = clamp(fit, ZMIN, ZMAX);
     }
     S.view = { z, x: W / 2 - cx * z, y: H / 2 - cy * z };
     invalidate(); renderZoom();
   }
   function applyPeerView(o) {
     if (o.page && o.page !== S.page && yPages.has(o.page)) setPage(o.page, true);
-    const z = clamp(Math.min(W / (o.x1 - o.x0), H / (o.y1 - o.y0)), 0.08, 12);
+    const z = clamp(Math.min(W / (o.x1 - o.x0), H / (o.y1 - o.y0)), 1e-4, ZMAX); // показываем ровно то, что видит собеседник
     S.view = { z, x: W / 2 - ((o.x0 + o.x1) / 2) * z, y: H / 2 - ((o.y0 + o.y1) / 2) * z };
     invalidate(); renderZoom();
   }
@@ -1093,6 +1099,16 @@ function startBoard(room) {
     drawPolyPreview(octx);
     // выделение
     octx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    // большой ластик: браузер не умеет курсор больше 128 точек, поэтому круг рисуем сами, ровно по месту стирания
+    if (bigEraser() && lastPtr && lastPtr.kind !== 'touch') {
+      const r = eraserRadius(), x = lastPtr.sx, y = lastPtr.sy;
+      octx.save(); octx.beginPath(); octx.arc(x, y, r, 0, Math.PI * 2);
+      octx.fillStyle = 'rgba(255,255,255,.55)'; octx.fill(); octx.lineWidth = 3; octx.strokeStyle = '#fff'; octx.stroke();
+      octx.lineWidth = 1.2; octx.strokeStyle = '#495057'; octx.stroke();
+      if (prefs.eraserPrecise) { octx.beginPath(); octx.arc(x, y, 1.5, 0, Math.PI * 2); octx.fillStyle = '#495057'; octx.fill(); }
+      octx.restore();
+    }
+    { const nav = activeNav(); if (nav) nav.drawOver(octx); }
     // выделение собеседника — оранжевым, без ручек
     for (const pv of remotePv.values()) {
       if (pv.page !== S.page) continue;
@@ -1116,6 +1132,15 @@ function startBoard(room) {
         octx.fillStyle = 'rgba(247,103,7,0.08)'; octx.fillRect(a1, b1, a2 - a1, b2 - b1); octx.lineWidth = 1; octx.strokeRect(a1, b1, a2 - a1, b2 - b1);
       }
       octx.restore();
+    }
+    // окно «Фигуры» открыто сразу после рисования: мягко подсвечиваем фигуру, которую поменяют толщина и цвет
+    if (S.justDrawn && popOpen('shapes')) {
+      const jd = justDrawnItem();
+      if (jd && !S.sel.has(jd.id)) {
+        const b = worldBox(jd), [x0, y0] = toScreen(b[0], b[1]), [x1, y1] = toScreen(b[2], b[3]), P = 7;
+        octx.save(); octx.fillStyle = 'rgba(76, 110, 245, .07)'; octx.strokeStyle = 'rgba(76, 110, 245, .6)'; octx.lineWidth = 1.5; octx.setLineDash([5, 4]);
+        octx.beginPath(); octx.roundRect(x0 - P, y0 - P, x1 - x0 + 2 * P, y1 - y0 + 2 * P, 8); octx.fill(); octx.stroke(); octx.restore();
+      }
     }
     if (S.sel.size && !(g && g.hideSel)) {
       const bb = selectionBox();
@@ -1477,8 +1502,11 @@ function startBoard(room) {
     return [wx, wy, p, e.clientX, e.clientY];
   }
   function eraserRadius() { return sz('eraser') / 2; }
+  const bigEraser = () => S.tool === 'eraser' && eraserRadius() * 2 > 116; // такой круг рисуем сами (курсор браузера не больше 128 точек)
   const eraseR = () => (eraserRadius() + 2) / S.view.z; // стирает по видимому краю курсора (у круга есть белая обводка)
-  function currentColor() { return S.tool === 'hl' ? prefs.hlColor : prefs.penColor; }
+  // Цвет у фигур свой: поменяли цвет только что нарисованной линии — ручка остаётся прежнего цвета
+  const shapeCtx = () => GROUPS.shapes.tools.includes(S.tool) || !!S.justDrawn;
+  function currentColor() { return S.tool === 'hl' ? prefs.hlColor : shapeCtx() ? (prefs.shapeColor || prefs.penColor) : prefs.penColor; }
 
   cvOver.addEventListener('pointerdown', onDown, { passive: false });
   cvOver.addEventListener('pointermove', onMove, { passive: false });
@@ -1498,9 +1526,11 @@ function startBoard(room) {
 
   function onDown(e) {
     e.preventDefault();
+    { const nav = !S.space && activeNav(); if (nav && nav.down(e)) { navGrab = nav; return; } } // внутри графика: тянем и масштабируем сам график
     if (radialEl) { closeRadial(); if (e.button !== 2) return; }
     if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
     closePopovers();
+    if (e.button !== 1 && !S.space && S.tool !== 'hand') dropJustDrawn(); // любое нажатие на доску, кроме прокрутки (колесо, пробел, рука), — новое действие
     const wasEditing = !!(S.editingId || editorOpen);
     if (wasEditing) closeEditors(true);
     // написали текст или формулу и щёлкнули по пустому месту — текст готов, дальше пишем ручкой
@@ -1580,12 +1610,15 @@ function startBoard(room) {
   let lastPenHover = null;
   function onMove(e) {
     if (penRec) recEv('move', e);
+    if (navGrab && navGrab.move(e)) return;
+    { const nav = activeNav(); if (nav) nav.hover(e); }
     if (e.pointerType === 'pen') penSeenAt = Date.now();
     if (e.pointerType === 'pen' && !e.buttons) lastPenHover = { x: e.clientX, y: e.clientY, t: e.timeStamp };
     if (e.pointerType !== 'touch') {
       const pr = readPoint(e, e.pointerType)[2];
       lastPtr = { sx: e.clientX, sy: e.clientY, p: pr, kind: e.pointerType, ev: { shiftKey: e.shiftKey, altKey: e.altKey } };
       kickAutoScroll();
+      if (bigEraser()) invalidate(false);
     }
     if (e.pointerType === 'touch' && touches.has(e.pointerId)) {
       touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1618,6 +1651,7 @@ function startBoard(room) {
     if (kind !== 'touch' || !pinch) { const [wx, wy] = toWorld(e.clientX, e.clientY); sendCursor(wx, wy); }
   }
   function onUp(e) {
+    if (navGrab && navGrab.up(e)) { if (!navGrab.busy()) navGrab = null; return; }
     if (e.pointerType === 'touch') { touches.delete(e.pointerId); if (pinch && touches.size < 2) { pinch = null; viewChanged(); } }
     if (gesture && gesture.pid === e.pointerId) {
       const g = gesture; gesture = null; drawEndAt = performance.now();
@@ -1634,7 +1668,7 @@ function startBoard(room) {
   function movePinch() {
     const [a, b] = [...touches.values()]; if (!b) return;
     const d = Math.hypot(a.x - b.x, a.y - b.y), mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
-    const v0 = pinch.view; const z = clamp(v0.z * (d / pinch.d), 0.08, 12);
+    const v0 = pinch.view; const z = clamp(v0.z * (d / pinch.d), Math.min(ZMIN, v0.z), ZMAX);
     const wx = (pinch.mx - v0.x) / v0.z, wy = (pinch.my - v0.y) / v0.z;
     S.view = { z, x: mx - wx * z, y: my - wy * z };
     if (S.follow) { S.follow = null; renderStatus(); }
@@ -1644,6 +1678,7 @@ function startBoard(room) {
   // колесо: Ctrl/щипок трекпада — масштаб; колесо мыши — масштаб (или прокрутка, см. настройки)
   cvOver.addEventListener('wheel', (e) => {
     e.preventDefault();
+    { const nav = activeNav(); if (nav && nav.wheel(e)) return; }
     // Перо на Windows: быстрый штрих система принимает за «взмах» и присылает прокрутку, и доска уезжает.
     // Прокрутку во время письма и сразу после него не принимаем (масштаб с Ctrl работает всегда).
     if (!e.ctrlKey && !e.metaKey && (gesture || performance.now() - drawEndAt < 700)) return;
@@ -1671,6 +1706,7 @@ function startBoard(room) {
     hoverRaf = requestAnimationFrame(() => {
       hoverRaf = 0; if (gesture || S.tool !== 'select' || S.space) return;
       const [x, y] = hoverXY; let c = 'default';
+      { const nav = activeNav(); if (nav && nav.inside(x, y)) { cvOver.style.cursor = 'grab'; return; } } // внутри графика — рука: можно тянуть
       const sm = shapeSel();
       const hs = sm ? shapeHit(sm, x, y) : null, hk = hs ? JSON.stringify(hs) : '';
       if (hk !== (S.hoverShapeKey || '')) { S.hoverShape = hs; S.hoverShapeKey = hk; invalidate(false); }
@@ -2188,7 +2224,7 @@ function startBoard(room) {
 
   // фигуры
   function shapeGesture(pt) {
-    const tool = S.tool; const color = prefs.penColor; const size = sz('shape') * 0.9;
+    const tool = S.tool; const color = prefs.shapeColor || prefs.penColor; const size = sz('shape') * 0.9;
     let cur = pt, shift = false;
     const isFig = tool.startsWith('fig:');
     const clickOnly = () => Math.hypot(cur[3] - pt[3], cur[4] - pt[4]) < 4;
@@ -2225,6 +2261,7 @@ function startBoard(room) {
         // линии и стрелки обычно рисуют подряд — инструмент остаётся
         // основные фигуры: выделение → щелчок по пустому → снова эта фигура → ещё щелчок → ручка
         if (!LINE_TOOLS.has(tool)) selectNew(id); // выделение → щелчок по пустому месту → ручка
+        markJustDrawn(id, tool);
       },
     };
     return g;
@@ -2234,7 +2271,7 @@ function startBoard(room) {
   let poly = null; // {pts:[[x,y]], cur:[x,y], t}
   function polyClick(pt) {
     const now = Date.now(); const close = 10 / S.view.z;
-    if (!poly) { poly = { pts: [[pt[0], pt[1]]], cur: [pt[0], pt[1]], t: now, color: prefs.penColor, size: sz('shape') * 0.9 }; invalidate(false); return; }
+    if (!poly) { poly = { pts: [[pt[0], pt[1]]], cur: [pt[0], pt[1]], t: now, color: prefs.shapeColor || prefs.penColor, size: sz('shape') * 0.9 }; invalidate(false); return; }
     const first = poly.pts[0], last = poly.pts[poly.pts.length - 1];
     if (poly.pts.length >= 3 && Math.hypot(pt[0] - first[0], pt[1] - first[1]) < close) { finishPoly(true); return; }
     if (now - poly.t < 350 && Math.hypot(pt[0] - last[0], pt[1] - last[1]) < close) { finishPoly(false); return; }
@@ -2247,6 +2284,7 @@ function startBoard(room) {
     const id = uid();
     act(() => addItem({ id, type: 'poly', page: S.page, z: zTop(S.page), x: x0, y: y0, s: 1, color: p.color, size: p.size, closed: closed && p.pts.length >= 3, pts: p.pts.map(([x, y]) => [x - x0, y - y0]) }));
     selectNew(id);
+    markJustDrawn(id, 'poly');
   }
   function drawPolyPreview(c) {
     if (!poly) return;
@@ -2673,7 +2711,7 @@ function startBoard(room) {
 
   // ---------- редакторы ----------
   let editorOpen = null;
-  function closeEditors(commit) { if (editorOpen) { const e = editorOpen; editorOpen = null; e.close(commit); } }
+  function closeEditors(commit) { if (editorOpen) { const e = editorOpen; editorOpen = null; return e.close(commit); } }
   const TEXT_SYMS = [ // ряды → группы
     [['°', '√', 'π', '∞', '±', '·', '×', '÷'], ['≤', '≥', '≠', '≈'], ['∠', '△', '⊥', '∥', '∈', '⇒', '⇔']],
     [['α', 'β', 'γ', 'Δ', 'φ', 'ω', 'λ', 'μ'], ['²', '³', 'ⁿ', '₁', '₂'], ['½', '⅓', '¼', '¾', 'a/b']],
@@ -2732,7 +2770,7 @@ function startBoard(room) {
     };
   }
 
-  function floatingPanel(wx, wy, content, cls = '') {
+  function floatingPanel(wx, wy, content, cls = '', avoid = null) {
     const p = el('div', { class: 'panel floating ' + cls }, content);
     document.body.append(p);
     const [sx, sy] = wx != null ? toScreen(wx, wy) : [W / 2 - 200, H / 3];
@@ -2744,6 +2782,15 @@ function startBoard(room) {
       const zb = zoomBar.getBoundingClientRect();
       const topLim = pos === 'top' ? tb.bottom + 8 : 60;
       let botLim = pos === 'bottom' ? tb.top - 8 : H - 8;
+      // окно не закрывает объект, который в нём правится: справа, слева, снизу или сверху от него — где поместится
+      if (avoid && !moved) {
+        const a = avoid();
+        if (a) for (const [l, t] of [[a[2] + 14, a[1]], [a[0] - 14 - r.width, a[1]], [a[0], a[3] + 12], [a[0], a[1] - 12 - r.height]]) {
+          const lb = l + r.width > zb.left - 8 && zb.width ? Math.min(botLim, zb.top - 8) : botLim;
+          const ll = clamp(l, 8, Math.max(8, W - r.width - 8)), tt = Math.max(topLim, Math.min(t, lb - r.height));
+          if (ll + r.width <= W - 8 && tt + r.height <= lb + 0.5 && !(ll < a[2] && ll + r.width > a[0] && tt < a[3] && tt + r.height > a[1])) { p.style.left = ll + 'px'; p.style.top = tt + 'px'; return; }
+        }
+      }
       const left = moved ? p.offsetLeft : clamp(sx, 8, W - r.width - 8);
       if (left + r.width > zb.left - 8 && zb.width) botLim = Math.min(botLim, zb.top - 8);
       p.style.left = clamp(left, 8, Math.max(8, W - r.width - 8)) + 'px';
@@ -2841,78 +2888,444 @@ function startBoard(room) {
     ['Прямая', '2x + 1'], ['Парабола', 'x^2 - 2x - 3'], ['Гипербола', '4/x'], ['Корень', 'sqrt(x)'], ['Модуль', '|x - 1|'],
     ['Кубическая', 'x^3 - 3x'], ['Показательная', '2^x'], ['Логарифм', 'ln(x)'], ['sin', 'sin(x)'], ['cos', 'cos(x)'], ['tg', 'tg(x)'],
     ['Окружность', '(x - 1)^2 + (y + 2)^2 = 9'], ['Эллипс', 'x^2/9 + y^2/4 = 1'], ['Кусочная', 'x^2 + 2, x >= -1; -2x + 1, x < -1'],
+    ['Точка', 'A(2; 3)'], ['Прямая x = a', 'x = 2'], ['Неравенство', 'y > x^2 - 4'], ['Полоса', '-1 <= x < 3'],
+    ['С параметрами', 'a(x - b)^2 + c'], ['Круг', 'x^2 + y^2 <= 9'],
   ];
+  const TRIG_RE = /\b(sin|cos|tg|tan|ctg|cot)\b/;
   const prettyExpr = (c) => c.replace(/\^2/g, '²').replace(/\^3/g, '³').replace(/\^x/g, 'ˣ').replace(/sqrt\(x\)/g, '√x').replace(/>=/g, '≥').replace(/<=/g, '≤').replace(/ - /g, ' − ').replace(/-(\d)/g, '−$1').replace(/; /g, ';  ');
-  function openGraphEditor(it, wx, wy) {
+  // старый график (всё в одной строке через «;», цвет первой функции — цвет ручки) → строки со своими цветами
+  function graphToV2(it) {
+    const rows = graphRows(it);
+    const lines = rows.length === 1 && rows[0].err ? String(it.expr || '').split('\n') : rows.map((r) => (r.pieces ? r.pieces.map((q) => q.src).join('; ') : r.src));
+    const eq = Math.abs((it.xmax - it.xmin) / it.w - (it.ymax - it.ymin) / it.h) < 0.01 * ((it.xmax - it.xmin) / it.w);
+    return { gv: 2, expr: lines.join('\n'), cols: lines.map((_, i) => (rows[i] && rows[i].color) || GRAPH_COLORS[i % 6]), off: [], eq };
+  }
+  // Масштаб и сдвиг внутри графика: колесо мыши и щипок меняют масштаб, перетаскивание сдвигает, наведение показывает координаты.
+  // Работает над выделенным графиком (кроме полосы у края: за неё график переносят) и над графиком, у которого открыто окно.
+  // Одно перетаскивание или серия щелчков колеса — один шаг «Отменить».
+  let graphEditing = false;
+  function graphNav(id, { band = 0, onWrite = null, onDown = null, frame = false, dbl = false } = {}) {
+    const cur = () => items.get(id);
+    let grouped = false, wheelT = 0;
+    const begin = () => { if (graphEditing || grouped) return; grouped = true; undo.stopCapturing(); undo.captureTimeout = 1e9; };
+    const end = () => { clearTimeout(wheelT); if (!grouped) return; grouped = false; undo.captureTimeout = 0; undo.stopCapturing(); };
+    const write = (f) => { const c = cur(); if (!c) return; begin(); act(() => setFields(id, c.gv === 2 ? f : { ...graphToV2(c), ...f })); onWrite && onWrite(); };
+    const localOf = (sx, sy) => { const c = cur(); const [wx2, wy2] = toWorld(sx, sy); return toItemLocal(c, wx2, wy2); };
+    const inside = (sx, sy) => {
+      const c = cur(); if (!c || c.page !== S.page) return false;
+      const [lx, ly] = localOf(sx, sy); const m = band / (S.view.z * (c.s || 1));
+      return lx >= m && ly >= m && lx <= c.w - m && ly <= c.h - m;
+    };
+    const toScr = (c, lx, ly) => { const [x, y] = rotOf(c) ? rotPt(c, lx, ly, 1) : [lx, ly]; const s = c.s || 1; return toScreen((c.x || 0) + x * s, (c.y || 0) + y * s); };
+    function zoom(k, fx = 0.5, fy = 0.5) {
+      const c = cur(); if (!c) return; const v = graphView(c);
+      const span = (v.xmax - v.xmin) * k, hs = (v.ymax - v.ymin) * k;
+      if (!(span > 1e-9 && span < 1e12)) return;
+      const cx = v.xmin + (v.xmax - v.xmin) * fx, cy = v.ymax - (v.ymax - v.ymin) * fy;
+      const xmin = cx - span * fx, ymax = cy + hs * fy;
+      write({ xmin, xmax: xmin + span, ymin: ymax - hs, ymax });
+    }
+    function pan(dlx, dly) { // сдвиг на столько точек графика
+      const c = cur(); if (!c) return; const v = graphView(c);
+      const ux = (v.xmax - v.xmin) / c.w, uy = (v.ymax - v.ymin) / c.h;
+      write({ xmin: c.xmin - dlx * ux, xmax: c.xmax - dlx * ux, ymin: c.ymin + dly * uy, ymax: c.ymax + dly * uy });
+    }
+    let trace = null, drag = null, dragRaf = 0, moved = false, downXY = null, lastTap = 0, hoverIn = false;
+    const ptrs = new Map();
+    function startDrag() {
+      const P = [...ptrs.values()];
+      const c = cur(); const v = graphView(c);
+      if (P.length >= 2) {
+        const m = [(P[0].x + P[1].x) / 2, (P[0].y + P[1].y) / 2];
+        drag = { pinch: true, d: Math.hypot(P[0].x - P[1].x, P[0].y - P[1].y) || 1, l: localOf(...m), v, c };
+      } else drag = { pinch: false, l: localOf(P[0].x, P[0].y), v, c };
+      trace = null;
+    }
+    function down(e) {
+      if (e.button !== 0 && e.pointerType === 'mouse') return false;
+      if (!ptrs.size && !inside(e.clientX, e.clientY)) return false;
+      e.preventDefault(); onDown && onDown();
+      if (!ptrs.size) { moved = false; downXY = [e.clientX, e.clientY]; }
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      try { cvOver.setPointerCapture(e.pointerId); } catch {}
+      startDrag(); cvOver.style.cursor = 'grabbing';
+      return true;
+    }
+    function applyDrag() {
+      dragRaf = 0; if (!drag) return;
+      const P = [...ptrs.values()]; const c = cur(); if (!c) return;
+      const { v } = drag;
+      if (drag.pinch && P.length >= 2) {
+        const d = Math.hypot(P[0].x - P[1].x, P[0].y - P[1].y) || 1, k = drag.d / d;
+        const m = [(P[0].x + P[1].x) / 2, (P[0].y + P[1].y) / 2];
+        // точка графика под пальцами остаётся под пальцами
+        const [l0x, l0y] = drag.l, gx = v.xmin + (l0x / c.w) * (v.xmax - v.xmin), gy = v.ymax - (l0y / c.h) * (v.ymax - v.ymin);
+        const [lx, ly] = localOf(...m);
+        const sx = (v.xmax - v.xmin) * k, sy = (v.ymax - v.ymin) * k;
+        if (!(sx > 1e-9 && sx < 1e12)) return;
+        const xmin = gx - (lx / c.w) * sx, ymax = gy + (ly / c.h) * sy;
+        write({ xmin, xmax: xmin + sx, ymin: ymax - sy, ymax });
+      } else if (P.length) {
+        const [lx, ly] = localOf(P[0].x, P[0].y);
+        const ux = (v.xmax - v.xmin) / c.w, uy = (v.ymax - v.ymin) / c.h;
+        const dx = (lx - drag.l[0]) * ux, dy = (ly - drag.l[1]) * uy;
+        write({ xmin: drag.c.xmin - dx, xmax: drag.c.xmax - dx, ymin: drag.c.ymin + dy, ymax: drag.c.ymax + dy });
+      }
+    }
+    function move(e) {
+      if (!ptrs.has(e.pointerId)) return false;
+      ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (!moved && downXY && Math.hypot(e.clientX - downXY[0], e.clientY - downXY[1]) < 4 && ptrs.size < 2) return true; // дрожание руки — ещё не сдвиг
+      moved = true;
+      if (!dragRaf) dragRaf = requestAnimationFrame(applyDrag);
+      return true;
+    }
+    function up(e) {
+      if (!ptrs.has(e.pointerId)) return false;
+      ptrs.delete(e.pointerId);
+      if (dragRaf) { cancelAnimationFrame(dragRaf); applyDrag(); }
+      if (ptrs.size) { startDrag(); return true; }
+      drag = null; end(); cvOver.style.cursor = 'grab';
+      // двойной щелчок по выделенному графику — окно графика
+      if (dbl && !moved) { const now = Date.now(); const prev = Math.max(lastTap, lastClick.id === id ? lastClick.t : 0); if (now - prev < 400) { lastClick = { t: 0, id: null }; lastTap = 0; const c = cur(); if (c) editItem(c); } else lastTap = now; }
+      return true;
+    }
+    function hover(e) {
+      if (ptrs.size || e.pointerType === 'touch' || gesture) return;
+      const c = cur(); const ins = !!c && inside(e.clientX, e.clientY);
+      if (ins !== hoverIn) { hoverIn = ins; if (ins) cvOver.style.cursor = 'grab'; else if (S.tool !== 'select') updateCursor(); }
+      if (!ins) { if (trace) { trace = null; invalidate(false); } return; }
+      const [lx, ly] = localOf(e.clientX, e.clientY);
+      const pk = graphPick(c, lx, ly, 14 / (S.view.z * (c.s || 1)));
+      const key = pk ? pk.x + ',' + pk.y : '';
+      if (key !== (trace ? trace.key : '')) { trace = pk ? { ...pk, key } : null; invalidate(false); }
+    }
+    function wheel(e) {
+      if (!inside(e.clientX, e.clientY)) return false;
+      e.preventDefault();
+      const c = cur(); const [lx, ly] = localOf(e.clientX, e.clientY);
+      const k = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? H : 1;
+      const dx = e.deltaX * k, dy = e.deltaY * k;
+      const looksLikeMouse = e.deltaMode === 1 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+      if (e.ctrlKey || e.metaKey || looksLikeMouse) {
+        const f = e.ctrlKey && !looksLikeMouse ? Math.exp(clamp(dy, -60, 60) * 0.01) : dy > 0 ? 1.2 : 1 / 1.2;
+        zoom(f, clamp(lx / c.w, 0, 1), clamp(ly / c.h, 0, 1));
+      } else { const z = S.view.z * (c.s || 1); pan(-dx / z, -dy / z); }
+      trace = null; invalidate(false);
+      clearTimeout(wheelT); wheelT = setTimeout(end, 500);
+      return true;
+    }
+    function drawOver(o) {
+      const c = cur(); if (!c || c.page !== S.page) return;
+      o.save();
+      if (frame) { // рамка: этот график сейчас правится
+        const P = [[0, 0], [c.w, 0], [c.w, c.h], [0, c.h]].map(([a, b]) => toScr(c, a, b));
+        o.strokeStyle = 'rgba(28,126,214,.55)'; o.lineWidth = 2; o.setLineDash([6, 4]);
+        o.beginPath(); P.forEach(([a, b], i) => (i ? o.lineTo(a, b) : o.moveTo(a, b))); o.closePath(); o.stroke(); o.setLineDash([]);
+      }
+      if (trace && !drag) {
+        const [a, b] = toScr(c, trace.lx, trace.ly);
+        o.beginPath(); o.arc(a, b, 5, 0, Math.PI * 2); o.fillStyle = trace.col; o.fill(); o.lineWidth = 2; o.strokeStyle = '#fff'; o.stroke();
+        const label = '(' + fmtCoord(trace.x) + '; ' + fmtCoord(trace.y) + ')';
+        o.font = `600 13px ${FONT}`; const tw = o.measureText(label).width;
+        let bx = a + 10, by = b - 30; if (bx + tw + 14 > W - 4) bx = a - 10 - tw - 14; if (by < 4) by = b + 10;
+        o.fillStyle = 'rgba(255,255,255,.96)'; o.strokeStyle = '#dee2e6'; o.lineWidth = 1;
+        o.beginPath(); o.roundRect(bx, by, tw + 14, 22, 6); o.fill(); o.stroke();
+        o.fillStyle = '#212529'; o.textBaseline = 'middle'; o.fillText(label, bx + 7, by + 11);
+      }
+      o.restore();
+    }
+    function stop() {
+      if (dragRaf) cancelAnimationFrame(dragRaf); dragRaf = 0;
+      for (const pid of ptrs.keys()) { try { cvOver.releasePointerCapture(pid); } catch {} }
+      ptrs.clear(); drag = null; trace = null; end();
+    }
+    return { id, inside, down, move, up, hover, wheel, drawOver, stop, busy: () => ptrs.size > 0 };
+  }
+  // выделен один график — внутри него можно сразу двигать и масштабировать
+  let selNav = null, navGrab = null;
+  function selGraphNav() {
+    if (editorOpen || S.tool !== 'select' || S.sel.size !== 1 || S.shapeEdit) return null;
+    const id = [...S.sel][0], it = items.get(id);
+    if (!it || it.type !== 'graph' || it.locked || it.page !== S.page) return null;
+    if (!selNav || selNav.id !== id) { if (selNav) selNav.stop(); selNav = graphNav(id, { band: 12, dbl: true }); }
+    return selNav;
+  }
+  const activeNav = () => (editorOpen && editorOpen.nav) || selGraphNav();
+
+  // Окно графика. Всё, что меняется, сразу видно на доске (и у учеников); всё окно — один шаг «Отменить».
+  // Пока окно открыто, над графиком колесо и щипок меняют масштаб, перетаскивание сдвигает, наведение показывает точки.
+  function openGraphEditor(it0, wx, wy) {
     closeEditors(true);
-    const f = it || { expr: 'x^2 - 2x - 3', xmin: -6, xmax: 6, ymin: -4.5, ymax: 4.5, w: 480, h: 360 }; // клетка одинаковая по x и y — окружность круглая
-    const ta = el('textarea', { class: 'inp mono', rows: 3, spellcheck: 'false' }); ta.value = f.expr;
-    const num = (v) => el('input', { class: 'inp num', type: 'number', step: 'any', value: v });
-    const xmin = num(f.xmin), xmax = num(f.xmax), ymin = num(f.ymin), ymax = num(f.ymax);
-    const msg = el('div', { class: 'small muted' });
-    const check = () => { try { const fs = compileMany(ta.value); msg.className = 'small err'; msg.textContent = fs.length ? '' : 'Введите хотя бы одну функцию'; return fs.length > 0; } catch (e) { msg.className = 'small err'; msg.textContent = e.message; return false; } };
-    ta.addEventListener('input', check);
-    const commit = () => {
-      if (!check()) return;
-      const vals = [xmin, xmax, ymin, ymax].map((i) => parseFloat(String(i.value).replace(',', '.')));
-      if (vals.some((v) => !Number.isFinite(v)) || vals[0] >= vals[1] || vals[2] >= vals[3]) { msg.className = 'small err'; msg.textContent = 'Проверьте границы осей: «от» должно быть меньше «до»'; return; }
-      const data = { expr: ta.value.trim(), xmin: vals[0], xmax: vals[1], ymin: vals[2], ymax: vals[3] }; let newId = null;
-      act(() => {
-        if (it && items.has(it.id)) setFields(it.id, data);
-        else { newId = uid(); addItem({ id: newId, type: 'graph', page: S.page, z: zTop(S.page), x: wx, y: wy, s: 1, w: f.w, h: f.h, color: prefs.penColor, ...data }); }
-      });
-      closeEditors(false);
-      if (newId) selectNew(newId);
+    undo.stopCapturing(); undo.captureTimeout = 1e9; graphEditing = true;
+    let changed = false, touchedView = false;
+    const isNew = !it0;
+    const id = isNew ? uid() : it0.id;
+    if (isNew) {
+      act(() => addItem({ id, type: 'graph', gv: 2, page: S.page, z: zTop(S.page), x: wx, y: wy, s: 1, w: 480, h: 360, color: prefs.penColor,
+        expr: '', cols: [], off: [], xmin: -6, xmax: 6, ymin: -4.5, ymax: 4.5, eq: true }));
+      changed = true;
+    }
+    const cur = () => items.get(id);
+    let it = cur();
+    if (S.sel.has(id)) { S.sel.delete(id); invalidate(); } // пока окно открыто, ручки рамки не нужны: внутри графика — сдвиг и масштаб
+    let lines = it.gv === 2 ? String(it.expr || '').split('\n') : graphToV2(it).expr.split('\n');
+    let cols = it.gv === 2 ? [...(it.cols || [])] : graphToV2(it).cols;
+    let off = it.gv === 2 ? [...(it.off || [])] : [];
+    if (lines.length === 1 && !lines[0]) lines = [];
+    const nextColor = () => {
+      const used = GRAPH_COLORS.slice(0, 6).map((c) => cols.filter((q) => q === c).length);
+      const k = used.indexOf(Math.min(...used)); return GRAPH_COLORS[k];
     };
-    ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commit(); } if (e.key === 'Escape') closeEditors(false); });
-    // Шаблон вставляется в строку там, где курсор: после «+», «−», «*», «(» — складывается с тем, что уже есть,
-    // иначе — отдельный график через «;». Первое число выделяется — можно сразу печатать своё.
-    let fresh = !it;
-    ta.addEventListener('input', () => { fresh = false; });
+    while (cols.length < lines.length) cols.push(GRAPH_COLORS[cols.length % 6]);
+    // запись в доску: старый график при первой правке становится новым
+    const write = (fields) => {
+      const c = cur(); if (!c) { finish(false, true); return; }
+      act(() => setFields(id, c.gv === 2 ? fields : { ...graphToV2(c), ...fields }));
+      changed = true;
+    };
+    const writeRows = () => write({ expr: lines.join('\n'), cols: [...cols], off: [...off] });
+
+    // ---------- строки ----------
+    const list = el('div', { class: 'grows' });
+    const parBox = el('div', { class: 'gpars' });
+    const swatchMenu = el('div', { class: 'gswatch', hidden: true });
+    let rowEls = [];
+    const errAt = (i) => { const r = graphRows(cur() || it)[i]; return r && r.err ? r.err : ''; };
+    function buildRows(focusAt = -1, caret = null) {
+      list.innerHTML = ''; rowEls = [];
+      const n = lines.length + 1; // последняя строка всегда пустая — в неё начинают новую запись
+      for (let i = 0; i < n; i++) {
+        const ghost = i === lines.length;
+        const inp = el('input', { class: 'grow-inp mono', spellcheck: 'false', autocomplete: 'off', value: ghost ? '' : lines[i],
+          placeholder: ghost ? (lines.length ? 'Ещё одна запись' : 'Например: x^2 - 2x - 3') : '' });
+        const dot = el('button', { class: 'gdot' + (off[i] ? ' off' : ''), 'data-tip': 'Цвет, скрыть', style: `--c:${ghost ? '#ced4da' : cols[i]}`, disabled: ghost });
+        const del = el('button', { class: 'gdel', 'data-tip': 'Удалить строку', html: ICONS.trash, hidden: ghost });
+        const err = el('div', { class: 'gerr' });
+        const row = el('div', { class: 'grow-row' + (ghost ? ' ghost' : '') }, dot, inp, del);
+        list.append(el('div', { class: 'grow-wrap' }, row, err));
+        rowEls.push({ inp, dot, err });
+        inp.addEventListener('input', () => {
+          if (ghost && inp.value) { lines.push(inp.value); cols.push(nextColor()); off.push(false); writeRows(); const c = inp.selectionStart; buildRows(i, c); return; }
+          if (!ghost) { lines[i] = inp.value; writeRows(); refresh(); }
+        });
+        inp.addEventListener('focus', () => { lastFocus = i; if (ghost && lines.length && !lines[lines.length - 1].trim()) focusRow(lines.length - 1); }); // пустая строка уже есть — пишем в неё
+        inp.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            if (e.ctrlKey || e.metaKey) { finish(true); return; }
+            if (ghost) { if (!inp.value) finish(true); return; }
+            lines.splice(i + 1, 0, ''); cols.splice(i + 1, 0, nextColor()); off.splice(i + 1, 0, false); writeRows(); buildRows(i + 1);
+          } else if (e.key === 'Backspace' && !inp.value && !ghost && lines.length) {
+            e.preventDefault(); removeRow(i, Math.max(0, i - 1));
+          } else if (e.key === 'ArrowUp' && i > 0) { e.preventDefault(); focusRow(i - 1); }
+          else if (e.key === 'ArrowDown' && i < n - 1) { e.preventDefault(); focusRow(i + 1); }
+          else if (e.key === 'Escape') { e.preventDefault(); finish(true); }
+        });
+        del.addEventListener('click', () => removeRow(i, Math.min(i, lines.length - 2)));
+        dot.addEventListener('click', (e) => { e.stopPropagation(); openSwatch(i, dot); });
+      }
+      refresh();
+      if (focusAt >= 0) focusRow(focusAt, caret);
+    }
+    let lastFocus = 0;
+    const focusRow = (i, caret = null) => { const r = rowEls[Math.min(i, rowEls.length - 1)]; if (!r) return; r.inp.focus(); const c = caret == null ? r.inp.value.length : caret; r.inp.setSelectionRange(c, c); };
+    function removeRow(i, focusAt) {
+      lines.splice(i, 1); cols.splice(i, 1); off.splice(i, 1); writeRows(); buildRows(Math.max(0, focusAt));
+    }
+    function openSwatch(i, dot) {
+      if (!swatchMenu.hidden && swatchMenu.dataset.row === String(i)) { swatchMenu.hidden = true; return; }
+      swatchMenu.dataset.row = String(i); swatchMenu.innerHTML = '';
+      swatchMenu.append(
+        el('div', { class: 'gsw-row' }, GRAPH_COLORS.map((c) => el('button', { class: 'gsw' + (cols[i] === c ? ' on' : ''), style: `--c:${c}`, onclick: () => { cols[i] = c; writeRows(); swatchMenu.hidden = true; buildRows(); } }))),
+        el('button', { class: 'gsw-hide', onclick: () => { off[i] = !off[i]; writeRows(); swatchMenu.hidden = true; buildRows(); } }, el('span', { class: 'ic', html: ICONS.eye }), off[i] ? 'Показать на графике' : 'Скрыть с графика'));
+      swatchMenu.hidden = false;
+      const pr = p.getBoundingClientRect(), dr = dot.getBoundingClientRect();
+      swatchMenu.style.left = dr.left - pr.left + 'px'; swatchMenu.style.top = dr.bottom - pr.top + 6 + 'px';
+    }
+    // ошибки по строкам и ползунки параметров — после каждой правки
+    let parKey = null;
+    function refresh() {
+      const c = cur(); if (!c) return;
+      rowEls.forEach((r, i) => { const m = i < lines.length && lines[i].trim() ? errAt(i) : ''; r.err.textContent = m; r.inp.classList.toggle('bad', !!m); });
+      const pars = graphPars(graphRows(c)).sort();
+      const key = pars.join(',');
+      if (key !== parKey) { parKey = key; buildPars(pars); }
+      if (viewOpen) syncView();
+    }
+
+    // ---------- параметры ----------
+    const anim = new Map(); let animRaf = 0, animWrite = 0;
+    const parVals = () => ({ ...((cur() || {}).par || {}) });
+    const parRange = (n) => ((cur() || {}).pr || {})[n] || [-10, 10];
+    const stepOf = (a, b) => { const r = (b - a) / 200; const p = Math.pow(10, Math.floor(Math.log10(r))); return p * (r / p < 2 ? 1 : r / p < 5 ? 2 : 5); };
+    const roundTo = (v, s) => { const d = Math.max(0, -Math.floor(Math.log10(s))); return +(Math.round(v / s) * s).toFixed(Math.min(10, d)); };
+    let parEls = {};
+    function buildPars(pars) {
+      parBox.innerHTML = ''; parEls = {};
+      for (const n of [...anim.keys()]) if (!pars.includes(n)) anim.delete(n);
+      if (!pars.length) { parBox.hidden = true; return; }
+      parBox.hidden = false;
+      for (const n of pars) {
+        const [a, b] = parRange(n); const v = parVals()[n] ?? 1;
+        const val = el('input', { class: 'gp-val mono', value: fmtNum(v), inputmode: 'decimal' });
+        const rng = el('input', { type: 'range', class: 'gp-rng', min: a, max: b, step: stepOf(a, b), value: v });
+        const play = el('button', { class: 'gp-play', 'data-tip': 'Двигать само', html: anim.has(n) ? ICONS.pause : ICONS.play });
+        parBox.append(el('div', { class: 'gp-row' }, el('b', { class: 'gp-n' }, n, ' ='), val, rng, play));
+        parEls[n] = { val, rng, play };
+        const setPar = (x) => { const pv = parVals(); pv[n] = x; write({ par: pv }); val.value = fmtNum(x); rng.value = x; refresh(); };
+        rng.addEventListener('input', () => setPar(roundTo(+rng.value, stepOf(...parRange(n)))));
+        // число за пределами ползунка — ползунок сам расширяется, чтобы его вместить
+        val.addEventListener('change', () => { const x = parseFloat(val.value.replace(',', '.').replace('−', '-')); if (Number.isFinite(x)) { const [a2, b2] = parRange(n); if (x < a2 || x > b2) { const R = Math.pow(10, Math.ceil(Math.log10(Math.abs(x) + 1e-9))); setRange(n, Math.min(a2, -R), Math.max(b2, R)); } setPar(x); } else val.value = fmtNum(parVals()[n] ?? 1); });
+        val.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); val.blur(); } });
+        play.addEventListener('click', () => {
+          if (anim.has(n)) anim.delete(n); else anim.set(n, { dir: 1 });
+          play.innerHTML = anim.has(n) ? ICONS.pause : ICONS.play;
+          if (anim.size && !animRaf) { animT = performance.now(); animRaf = requestAnimationFrame(animStep); }
+        });
+      }
+    }
+    function setRange(n, a, b) {
+      const pr = { ...((cur() || {}).pr || {}) }; pr[n] = [a, b]; write({ pr });
+      const e = parEls[n]; if (e) { e.rng.min = a; e.rng.max = b; e.rng.step = stepOf(a, b); }
+    }
+    // анимация: туда и обратно за 6 секунд; в доску пишем не чаще 20 раз в секунду
+    let animT = 0;
+    function animStep(t) {
+      animRaf = 0; if (!anim.size || !cur()) return;
+      const dt = Math.min(0.1, (t - animT) / 1000); animT = t;
+      const pv = parVals();
+      for (const [n, st] of anim) {
+        const [a, b] = parRange(n); let x = (pv[n] ?? 1) + st.dir * ((b - a) / 3) * dt;
+        if (x >= b) { x = b; st.dir = -1; } if (x <= a) { x = a; st.dir = 1; }
+        pv[n] = x;
+        const e = parEls[n]; if (e) { e.rng.value = x; e.val.value = fmtNum(roundTo(x, stepOf(a, b))); }
+      }
+      if (t - animWrite > 50) { animWrite = t; write({ par: pv }); }
+      animRaf = requestAnimationFrame(animStep);
+    }
+    const stopAnim = () => { anim.clear(); if (animRaf) cancelAnimationFrame(animRaf); animRaf = 0; Object.values(parEls).forEach((e) => (e.play.innerHTML = ICONS.play)); };
+
+    // ---------- настройки: только то, что меняет вид графика для ученика ----------
+    const chk = (label, get, set) => { const c = el('input', { type: 'checkbox' }); c.checked = get(); c.addEventListener('change', () => { set(c.checked); syncView(); }); return { c, row: el('label', { class: 'gchk' }, c, label) }; };
+    const fLeg = chk('Подписи формул', () => !cur().nolegend, (v) => write({ nolegend: !v }));
+    const fPoi = chk('Нули и вершины с координатами', () => !!cur().pois, (v) => write({ pois: v }));
+    const fPi = chk('Деления по x через π', () => !!cur().xpi, (v) => write({ xpi: v }));
+    const fGrid = chk('Сетка', () => !cur().nogrid, (v) => write({ nogrid: !v }));
+    const axX = el('input', { class: 'inp gax', maxlength: 12, placeholder: 'x' }), axY = el('input', { class: 'inp gax', maxlength: 12, placeholder: 'y' });
+    axX.addEventListener('input', () => write({ axx: axX.value.trim() })); axY.addEventListener('input', () => write({ axy: axY.value.trim() }));
+    function syncView() {
+      const c = cur(); if (!c) return;
+      fGrid.c.checked = !c.nogrid; fLeg.c.checked = !c.nolegend; fPoi.c.checked = !!c.pois; fPi.c.checked = !!c.xpi;
+      if (document.activeElement !== axX) axX.value = c.axx || ''; if (document.activeElement !== axY) axY.value = c.axy || '';
+    }
+    const resetView = () => { const c = cur(); write({ xmin: -6, xmax: 6, ymin: -6 * c.h / c.w, ymax: 6 * c.h / c.w, eq: true }); touchedView = true; closeMenus(); };
+    const viewMenu = el('div', { class: 'gmenu gview', hidden: true },
+      fLeg.row, fPoi.row, fPi.row, fGrid.row,
+      el('div', { class: 'axrow' }, el('span', {}, 'Названия осей'), axX, axY),
+      el('button', { class: 'btn gv-reset', onclick: resetView }, 'Вернуть начальный масштаб'));
+    let viewOpen = false;
+
+    // ---------- шаблоны ----------
     const insTpl = (code) => {
-      const v = ta.value; let a = ta.selectionStart, b = ta.selectionEnd;
-      if (fresh) { a = 0; b = v.length; fresh = false; }
-      const before = v.slice(0, a).replace(/\s+$/, '');
-      const join = !before || /[+\-*/(;\n,=]$/.test(before);
-      const piece = join ? (before && !/[(\n]$/.test(before) ? ' ' : '') + code : '; ' + code;
-      ta.value = v.slice(0, a).replace(/\s+$/, '') + piece + v.slice(b);
-      const at = a - (v.slice(0, a).length - v.slice(0, a).replace(/\s+$/, '').length) + piece.length - code.length;
-      const m = code.match(/(?<!\^)\d+(\.\d+)?/); // первое число, но не степень
-      ta.focus();
-      if (m) ta.setSelectionRange(at + m.index, at + m.index + m[0].length); else ta.setSelectionRange(at + code.length, at + code.length);
-      check(); pvMaybeSend();
+      const at = rowEls.findIndex((r) => r.inp === document.activeElement);
+      let i = at >= 0 && at < lines.length && !lines[at].trim() ? at : at >= 0 && at < lines.length ? at + 1 : lines.length;
+      if (i === lines.length || lines[i] === undefined) { lines.splice(i, 0, code); cols.splice(i, 0, nextColor()); off.splice(i, 0, false); }
+      else if (lines[i].trim()) { lines.splice(i, 0, code); cols.splice(i, 0, nextColor()); off.splice(i, 0, false); }
+      else lines[i] = code;
+      const c = cur(); const extra = TRIG_RE.test(code) && !c.xpi && !lines.some((l, k) => k !== i && l.trim()) ? { xpi: true } : {};
+      write({ expr: lines.join('\n'), cols: [...cols], off: [...off], ...extra });
+      buildRows();
+      const r = rowEls[i]; r.inp.focus();
+      const m = code.match(/(?<![\^a-z])\d+(\.\d+)?/); // первое число, но не степень — можно сразу печатать своё
+      if (m) r.inp.setSelectionRange(m.index, m.index + m[0].length); else r.inp.setSelectionRange(code.length, code.length);
     };
-    // внизу: «Шаблоны» и «Оси» — выпадающие списки, чтобы окно было свободным
     const menus = [];
-    const dropdown = (label, content, cls) => {
-      const menu = el('div', { class: 'gmenu ' + cls, hidden: true }, content);
+    const dropdown = (label, menu, onOpen) => {
       const btn = el('button', { class: 'btn ddbtn', onclick: () => {
-        const open = menu.hidden; menus.forEach((m) => { m.menu.hidden = true; m.btn.classList.remove('on'); }); menu.hidden = !open; btn.classList.toggle('on', open);
-        if (open) { menu.classList.remove('down'); if (menu.getBoundingClientRect().top < 8) menu.classList.add('down'); } // не помещается сверху — раскрываем вниз
+        const open = menu.hidden; menus.forEach((m) => { m.menu.hidden = true; m.btn.classList.remove('on'); }); viewOpen = false;
+        menu.hidden = !open; btn.classList.toggle('on', open); if (open) onOpen?.();
+        if (open) { menu.classList.remove('down'); if (menu.getBoundingClientRect().top < 8) menu.classList.add('down'); }
       } }, label, el('span', { class: 'dd-tri' }));
-      menus.push({ menu, btn }); return { menu, btn };
+      menus.push({ menu, btn }); return btn;
     };
-    const closeMenus = () => menus.forEach((m) => { m.menu.hidden = true; m.btn.classList.remove('on'); });
-    const tplMenu = dropdown('Шаблоны', GRAPH_TPL.map(([name, code]) => el('button', { class: 'tpl', onclick: () => { closeMenus(); insTpl(code); } }, el('b', {}, name), el('span', {}, prettyExpr(code)))), 'tpls');
-    const axMenu = dropdown('Оси', [el('div', { class: 'axrow' }, el('span', {}, 'x от'), xmin, el('span', {}, 'до'), xmax), el('div', { class: 'axrow' }, el('span', {}, 'y от'), ymin, el('span', {}, 'до'), ymax)], 'axes');
-    const p = floatingPanel(it ? it.x : wx, it ? worldBox(it)[3] : wy, [
-      el('div', { class: 'panel-title' }, it ? 'Изменить график' : 'Новый график'),
-      ta, msg, tplMenu.menu, axMenu.menu,
-      el('div', { class: 'gfoot' }, tplMenu.btn, axMenu.btn, el('div', { class: 'grow' }),
-        el('button', { class: 'btn', onclick: () => closeEditors(false) }, 'Отмена'), el('button', { class: 'btn primary', onclick: commit }, it ? 'Сохранить' : 'Вставить')),
-    ], 'gpanel');
-    p.addEventListener('pointerdown', (e) => { if (!menus.some((m) => m.menu.contains(e.target) || m.btn.contains(e.target))) closeMenus(); });
-    check(); ta.focus(); ta.select();
-    ta.addEventListener('input', () => pvMaybeSend());
-    editorOpen = { close() { p.remove(); },
-      pv: () => {
-        let ok = false; try { ok = compileMany(ta.value).length > 0; } catch {}
-        return { tmp: ok ? [{ ...(it || { id: '_pvg', type: 'graph', page: S.page, x: wx, y: wy, s: 1, w: f.w, h: f.h, color: prefs.penColor, xmin: f.xmin, xmax: f.xmax, ymin: f.ymin, ymax: f.ymax }), expr: ta.value.trim() }] : [], hidden: it ? [it.id] : [] };
-      } };
+    const closeMenus = () => { menus.forEach((m) => { m.menu.hidden = true; m.btn.classList.remove('on'); }); viewOpen = false; };
+    const tplMenu = el('div', { class: 'gmenu tpls', hidden: true }, GRAPH_TPL.map(([name, code]) => el('button', { class: 'tpl', onclick: () => { closeMenus(); insTpl(code); } }, el('b', {}, name), el('span', {}, prettyExpr(code)))));
+    const helpMenu = el('div', { class: 'gmenu ghelp', hidden: true });
+    const tplBtn = dropdown('Шаблоны', tplMenu), viewBtn = dropdown('Настройки', viewMenu, () => { viewOpen = true; syncView(); });
+    helpMenu.append(el('div', { class: 'small' },
+        el('div', {}, el('b', {}, 'x^2 - 3x'), ' или ', el('b', {}, 'y = 2x + 1'), ': график функции'),
+        el('div', {}, el('b', {}, 'x^2 + y^2 = 9'), ': кривая, ', el('b', {}, 'x = 3'), ': вертикальная прямая'),
+        el('div', {}, el('b', {}, 'A(2; 3)'), ': точка с подписью'),
+        el('div', {}, el('b', {}, 'y > x^2'), ', ', el('b', {}, '-1 <= x < 3'), ': область, закрашивается'),
+        el('div', {}, el('b', {}, 'x^2, x >= 0; -x, x < 0'), ': кусочная функция в одной строке'),
+        el('div', {}, el('b', {}, 'a(x - b)^2'), ': любая другая буква становится параметром с ползунком'),
+        el('div', {}, 'Функции: sin cos tg ctg sqrt abs ln lg log, число π пишется как pi, модуль |x|'),
+        el('div', { class: 'muted' }, 'Над графиком колесо мыши или два пальца меняют масштаб, перетаскивание сдвигает.')));
+    const helpBtn = el('button', { class: 'ghelp-btn', 'data-tip': 'Что можно писать' }, '?');
+    helpBtn.addEventListener('pointerdown', (e) => e.stopPropagation()); // заголовок двигает окно, а знак вопроса — нет
+    helpBtn.addEventListener('click', () => { const open = helpMenu.hidden; closeMenus(); helpMenu.hidden = !open; helpBtn.classList.toggle('on', open); });
+    menus.push({ menu: helpMenu, btn: helpBtn });
+    const p = floatingPanel(it.x, worldBox(it)[3], [
+      el('div', { class: 'panel-title gtitle' }, el('span', {}, 'График'), helpBtn),
+      list, parBox, swatchMenu, tplMenu, viewMenu, helpMenu,
+      el('div', { class: 'gfoot' }, tplBtn, viewBtn, el('div', { class: 'grow' }),
+        el('button', { class: 'btn', onclick: () => finish(false) }, 'Отмена'),
+        el('button', { class: 'btn primary', onclick: () => finish(true) }, 'Готово')),
+    ], 'gpanel gv2', () => { const c = cur(); if (!c) return null; const b = worldBox(c); const [a0, b0] = toScreen(b[0], b[1]), [a1, b1] = toScreen(b[2], b[3]); return [a0, b0, a1, b1]; });
+    p.addEventListener('pointerdown', (e) => {
+      if (!menus.some((m) => m.menu.contains(e.target) || m.btn.contains(e.target))) closeMenus();
+      if (!swatchMenu.contains(e.target) && !e.target.closest('.gdot')) swatchMenu.hidden = true;
+    });
+    buildRows(lines.length ? -1 : 0);
+    if (lines.length) focusRow(Math.max(0, lines.length - 1));
+
+    const nav = graphNav(id, { frame: true, onWrite: () => { changed = true; touchedView = true; }, onDown: () => { closeMenus(); swatchMenu.hidden = true; } });
+
+    let done = false;
+    function finish(keep, gone = false) {
+      if (done) return; done = true;
+      stopAnim(); nav.stop();
+      if (editorOpen === ed) editorOpen = null;
+      p.remove();
+      const c = cur();
+      const blank = !lines.some((l) => l.trim());
+      if (keep && !gone && c && c.gv === 2) {
+        // пустые строки при закрытии убираем вместе с их цветами
+        const keepIdx = lines.map((l, i) => (l.trim() ? i : -1)).filter((i) => i >= 0);
+        if (keepIdx.length !== lines.length) write({ expr: keepIdx.map((i) => lines[i]).join('\n'), cols: keepIdx.map((i) => cols[i]), off: keepIdx.map((i) => !!off[i]) });
+      }
+      graphEditing = false; undo.captureTimeout = 0; undo.stopCapturing();
+      // новый график, в который ничего не написали и который не двигали, после щелчка мимо не оставляем
+      const discard = !gone && changed && (!keep || (isNew && blank && !touchedView && keep === 'outside'));
+      if (discard) { undo.undo(); undo.redoStack.pop(); } // и «Вернуть» его не воскрешает
+      invalidate();
+      if (keep && !discard && isNew && cur()) selectNew(id);
+      return discard ? 'discarded' : '';
+    }
+    const ed = {
+      graphId: id, nav,
+      close(commit) { return finish(commit ? 'outside' : false); },
+    };
+    editorOpen = ed;
+    invalidate(false);
   }
 
   // ---------- панель действий над выделением ----------
   // только что созданное — сразу выделено, можно тянуть
+  // Только что нарисованная фигура (кроме объёмных тел — они и так выделяются): пока человек никуда не нажал,
+  // толщина в окне «Фигуры» и цвет на панели меняют её. Колесо и прокрутка доски эту связь не рвут.
+  function markJustDrawn(id, tool) {
+    const it = items.get(id);
+    S.justDrawn = it && !(it.type === 'fig' && SOLID_KINDS.has(it.kind)) ? { id, tool } : null;
+  }
+  function justDrawnItem() {
+    const j = S.justDrawn; if (!j) return null;
+    const it = items.get(j.id);
+    if (!it || it.page !== S.page || it.locked) { S.justDrawn = null; return null; }
+    return it;
+  }
+  function dropJustDrawn() { if (S.justDrawn) { S.justDrawn = null; invalidate(false); } }
   function selectNew(id, backTo = null) {
     if (S.tool !== 'select') setTool('select', { noToggle: true });
     S.sel = new Set([id]); S.autoBack = id; S.autoBackTool = backTo; invalidate();
@@ -3151,15 +3564,20 @@ function startBoard(room) {
   function sizeRow(k, get, set, live) {
     const c = SIZE_CFG[k];
     const val = el('span', { class: 'sz-val' });
-    const range = el('input', { type: 'range', class: 'sz-range', min: c.min, max: c.max, step: c.step, value: get() });
-    const paint = () => { const v = get(); if (document.activeElement !== range || !dragging) range.value = v; val.textContent = String(+range.value).replace('.', ','); };
+    // положение ползунка 0…1000 ↔ значение по логарифму, с шагом инструмента
+    const L0 = Math.log(c.min), L1 = Math.log(c.max);
+    const toV = (p) => clamp(Math.round(Math.exp(L0 + (L1 - L0) * (p / 1000)) / c.step) * c.step, c.min, c.max);
+    const toP = (v) => Math.round(((Math.log(clamp(v, c.min, c.max)) - L0) / (L1 - L0)) * 1000);
+    const range = el('input', { type: 'range', class: 'sz-range', min: 0, max: 1000, step: 1, value: toP(get()) });
+    const shown = () => toV(+range.value);
+    const paint = () => { const v = get(); if (document.activeElement !== range || !dragging) range.value = toP(v); val.textContent = String(document.activeElement === range && dragging ? shown() : v).replace('.', ','); };
     let dragging = false;
     const begin = () => { if (dragging) return; dragging = true; undo.stopCapturing(); undo.captureTimeout = 1e9; };
     const finish = () => { if (!dragging) return; dragging = false; undo.captureTimeout = 0; undo.stopCapturing(); };
     range.addEventListener('pointerdown', begin);
     range.addEventListener('keydown', begin);
-    range.addEventListener('input', () => { if (live) { begin(); set(+range.value); } else set(+range.value, false); val.textContent = String(+range.value).replace('.', ','); });
-    range.addEventListener('change', () => { if (!live) set(+range.value, true); finish(); paint(); range.blur(); }); // фокус не держим — Ctrl+Z и клавиши инструментов работают сразу
+    range.addEventListener('input', () => { if (live) { begin(); set(shown()); } else set(shown(), false); val.textContent = String(shown()).replace('.', ','); });
+    range.addEventListener('change', () => { if (!live) set(shown(), true); finish(); paint(); range.blur(); }); // фокус не держим — Ctrl+Z и клавиши инструментов работают сразу
     range.addEventListener('pointerup', finish);
     range.addEventListener('blur', finish);
     paint();
@@ -3321,10 +3739,14 @@ function startBoard(room) {
     invalidate(); selBar.dataset.key = '';
   }
   function setColor(c) {
-    if (S.sel.size) {
-      act(() => { for (const id of S.sel) { const it = items.get(id); if (it && it.type !== 'image') setFields(id, it.type === 'note' ? { bg: noteBg(c) } : { color: c }); } });
+    const jd = justDrawnItem();
+    if (S.sel.size || jd) {
+      act(() => {
+        for (const id of S.sel) { const it = items.get(id); if (it && it.type !== 'image') setFields(id, it.type === 'note' ? { bg: noteBg(c) } : it.type === 'graph' && it.gv === 2 ? { color: c, cols: [c, ...(it.cols || []).slice(1)] } : { color: c }); }
+        if (jd && !S.sel.has(jd.id) && jd.color !== c) setFields(jd.id, { color: c });
+      });
     }
-    if (S.tool === 'hl') prefs.hlColor = c; else prefs.penColor = c;
+    if (S.tool === 'hl') prefs.hlColor = c; else if (shapeCtx()) prefs.shapeColor = c; else prefs.penColor = c;
     prefs.recentColors = [c, ...(prefs.recentColors || []).filter((x) => x !== c)].slice(0, 4);
     savePrefs(); renderToolbar(); updateCursor();
   }
@@ -3341,6 +3763,7 @@ function startBoard(room) {
       if (t === 'eraser') { prefs.eraserPrecise = !prefs.eraserPrecise; savePrefs(); }
     }
     if (poly) finishPoly(false);
+    if (S.justDrawn && t !== S.justDrawn.tool) dropJustDrawn(); // другой инструмент — это уже другое действие
     S.tool = t; S.autoBack = null; closeEditors(true);
     if (INK_TOOLS.has(t) && prefs.lastInk !== t) { prefs.lastInk = t; savePrefs(); }
     for (const [gn, g] of Object.entries(GROUPS)) if (g.tools.includes(t)) { prefs['last_' + gn] = t; savePrefs(); }
@@ -3349,9 +3772,10 @@ function startBoard(room) {
   }
   function updateCursor() {
     const c = INK_TOOLS.has(S.tool) ? penCursor(S.tool === 'hl' ? 'hl' : S.tool === 'dpen' ? 'dash' : 'pen', currentColor())
-      : S.tool === 'eraser' ? eraserCursor(eraserRadius() * 2, prefs.eraserPrecise)
+      : S.tool === 'eraser' ? (bigEraser() ? 'none' : eraserCursor(eraserRadius() * 2, prefs.eraserPrecise))
       : S.tool === 'select' ? selectCursor() : { hand: 'grab', text: 'text' }[S.tool] || 'crosshair';
     cvOver.style.cursor = S.space ? 'grab' : c;
+    if (S.tool === 'eraser') invalidate(false); // большой ластик рисуется на доске — меняем его размер сразу
   }
   const sizeKey = () => (S.tool === 'hl' ? 'hl' : S.tool === 'eraser' ? 'eraser' : S.tool === 'text' || S.tool === 'tex' ? 'text' : GROUPS.shapes.tools.includes(S.tool) ? 'shape' : 'pen');
   // [ и ] — к соседнему готовому значению
@@ -3368,6 +3792,8 @@ function startBoard(room) {
     // поменяли толщину выделенных фигур — следующая фигура будет такой же
     else if (applyToSel && k === 'pen' && [...S.sel].some((id) => SIZED_SHAPES.includes(items.get(id)?.type))) { prefs.shapeSize = v; savePrefs(); }
     queueMicrotask(() => { sizePaint?.(); selBar._sync?.(); });
+    const jd = k === 'shape' && !onlySel ? justDrawnItem() : null;
+    if (jd && !S.sel.has(jd.id) && SIZED_SHAPES.includes(jd.type) && Math.abs((jd.size ?? -1) - v * 0.9) > 1e-9) act(() => setFields(jd.id, { size: v * 0.9 }));
     if (applyToSel && S.sel.size && k !== 'eraser') {
       act(() => {
         for (const id of S.sel) {
@@ -3440,8 +3866,8 @@ function startBoard(room) {
     sizePaint = () => { if (document.body.contains(pop)) paintAll(); else sizePaint = null; };
     paintAll();
   }
-  function doUndo() { closeEditors(true); undoPages.clear(); undo.undo(); afterUndo(); }
-  function doRedo() { closeEditors(true); undoPages.clear(); undo.redo(); afterUndo(); }
+  function doUndo() { dropJustDrawn(); const d = closeEditors(true); undoPages.clear(); if (d !== 'discarded') undo.undo(); afterUndo(); } // пустой новый график убрали при закрытии — это и есть отмена
+  function doRedo() { dropJustDrawn(); const d = closeEditors(true); undoPages.clear(); if (d !== 'discarded') undo.redo(); afterUndo(); }
   function afterUndo() {
     if (undoPages.size && !undoPages.has(S.page)) { const p = [...undoPages][0]; if (yPages.has(p)) { setPage(p); } }
   }
@@ -3485,7 +3911,7 @@ function startBoard(room) {
     }
     if (e.altKey) { if (e.key === 'Alt') e.preventDefault(); return; }
     if (poly && (e.key === 'Enter' || e.key === 'Escape')) { e.preventDefault(); if (e.key === 'Enter') finishPoly(false); else { poly = null; invalidate(false); } return; }
-    if (e.key === 'Escape') { if (gesture) { gesture.cancel?.(); gesture = null; } closePopovers(); if (shapeSel()) { setShapeEdit(null); return; } S.sel.clear(); invalidate(); return; }
+    if (e.key === 'Escape') { if (gesture) { gesture.cancel?.(); gesture = null; } closePopovers(); dropJustDrawn(); if (shapeSel()) { setShapeEdit(null); return; } S.sel.clear(); invalidate(); return; }
     if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       if (S.sel.size) deleteSelection();
@@ -3799,7 +4225,7 @@ function startBoard(room) {
   // ---------- интерфейс ----------
   const icon = (name) => { const s = el('span', { class: 'ic', html: ICONS[name] || '' }); return s; };
   const popovers = new Set();
-  function closePopovers() { for (const p of popovers) p.remove(); popovers.clear(); }
+  function closePopovers() { for (const p of popovers) p.remove(); popovers.clear(); if (S.justDrawn) invalidate(false); }
   function popoverAt(x, y, content) {
     closePopovers();
     const p = el('div', { class: 'panel pop' }, content);
@@ -3910,6 +4336,7 @@ function startBoard(room) {
     stopAim();
     const gp = groupPop; groupPop = null; if (!gp) return;
     gp.el.remove(); gp.bridge?.remove(); popovers.delete(gp.el); popovers.delete(gp.bridge);
+    if (S.justDrawn) invalidate(false); // подсветка только что нарисованной фигуры гаснет вместе с окном
   }
   // Курсор ушёл с кнопки наискосок к окну: окно не закрываем, пока он движется внутри треугольника
   // от точки ухода к ближнему краю окна (так делают меню в macOS). Свернул в сторону или замер — окно закрывается.
@@ -4006,6 +4433,7 @@ function startBoard(room) {
             pop.place(); // высота стала меньше — придвигаем окно к кнопке
           }
           hoverPop(pop, btn, gname);
+          if (gname === 'shapes' && S.justDrawn) invalidate(false); // подсветить фигуру, которую сейчас поменяем
         };
         toolbar.append(btn);
         continue;
@@ -4441,7 +4869,7 @@ function startBoard(room) {
   }
   function lessonReplay() {
     const its = pageItems().filter((it) => !hiddenByShade(it)); if (!its.length) { toast('Лист пустой, повторять нечего'); return; }
-    startReplay({ items: its, bg: yMeta.get('bg') || 'grid', title: pages().find((p) => p.id === S.page)?.name || '' });
+    window.__replay = startReplay({ items: its, bg: yMeta.get('bg') || 'grid', title: pages().find((p) => p.id === S.page)?.name || '' });
   }
   // «Что нового»: окно со списком изменений. Кнопка сбоку видна сутки после выхода версии.
   function showRelease(rel = releaseFor(ACCOUNTS), pending = false) {
@@ -4475,13 +4903,11 @@ function startBoard(room) {
     document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
   }
   // Масштаб — снизу справа. Шаг как у Ctrl + колесо, от центра экрана.
-  // шаг 10 процентов (выше 400% — 25, иначе до 1200% не докрутить), значения ровные: 100, 110, 120…
+  // ровные значения из списка ZSTEPS: 2, 3, 4, 5, 6, 8, 10, 12, 15, 20 … 50, 60 … 400, 425 … 1200
   function zoomStep(d, x = W / 2, y = H / 2) {
     const pc = S.view.z * 100;
-    const st = (v) => (v < 400 ? 10 : 25);
-    const up = d > 0, s0 = st(up ? pc + 1e-6 : pc - 1e-6);
-    const next = clamp((up ? Math.floor(pc / s0 + 1e-6) + 1 : Math.ceil(pc / s0 - 1e-6) - 1) * s0, 10, 1200) / 100;
-    zoomAt(x, y, next / S.view.z);
+    const next = d > 0 ? (ZSTEPS.find((v) => v > pc + 1e-6) ?? ZSTEPS[ZSTEPS.length - 1]) : ([...ZSTEPS].reverse().find((v) => v < pc - 1e-6) ?? Math.min(pc, ZSTEPS[0]));
+    zoomAt(x, y, next / 100 / S.view.z);
   }
   // Кнопка масштаба: нажатие — шаг 10%, удержание — масштаб меняется сам, всё быстрее и быстрее
   function holdZoom(btn, d) {
@@ -4490,7 +4916,7 @@ function startBoard(room) {
     const tick = (t) => {
       const dt = Math.min(0.05, (t - last) / 1000); last = t;
       const speed = Math.min(1.7, 0.35 + 0.9 * ((t - t0) / 1000)); // во сколько раз (по логарифму) за секунду: сначала медленно, потом быстрее
-      const z = S.view.z, nz = clamp(z * Math.exp(d * speed * dt), 0.1, 12);
+      const z = S.view.z, nz = clamp(z * Math.exp(d * speed * dt), Math.min(ZMIN, z), ZMAX);
       if (nz === z) { stop(); return; }
       zoomAt(W / 2, H / 2, nz / z);
       raf = requestAnimationFrame(tick);
@@ -4518,7 +4944,7 @@ function startBoard(room) {
     zoomBtn,
     holdZoom(el('button', { class: 'tbtn', title: 'Приблизить (Ctrl +). Зажмите, чтобы приближать плавно' }, icon('plus')), 1));
   document.body.append(zoomBar);
-  function renderZoom() { zoomBtn.textContent = Math.round(S.view.z * 100) + '%'; }
+  function renderZoom() { const pc = S.view.z * 100; zoomBtn.textContent = (pc >= 9.95 ? String(Math.round(pc)) : String(Math.round(pc * 10) / 10).replace('.', ',')) + '%'; }
   // Панель инструментов всегда строго по центру. Строку выбираем только по ширине окна
   // (левая и правая панели имеют фиксированную наибольшую ширину), поэтому при смене инструмента,
   // названия или статуса она не сдвигается ни на пиксель.
