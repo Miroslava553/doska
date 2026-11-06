@@ -29,7 +29,7 @@ const page = (js) => `<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Lodl · онлайн-доска для занятий</title>
-<link rel="icon" href="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="7" fill="#4c6ef5"/><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg>')}">
+<link rel="icon" href="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5c7cfa"/><stop offset="1" stop-color="#4263eb"/></linearGradient></defs><rect width="64" height="64" rx="14" fill="url(#g)"/><path d="M14 16h36a5 5 0 0 1 5 5v19a5 5 0 0 1-5 5H28l-9 8v-8h-5a5 5 0 0 1-5-5V21a5 5 0 0 1 5-5z" fill="#fff"/><path d="M18 35c4-9 8-9 11-2s7 6 11-4" fill="none" stroke="#4263eb" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="45.5" cy="25" r="3.2" fill="#ff922b"/></svg>')}">
 <style>${css}</style>
 </head>
 <body>

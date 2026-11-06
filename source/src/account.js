@@ -124,7 +124,7 @@ function sheet(card, { onClose, dark = false } = {}) {
 }
 const xBtn = (close) => el('button', { class: 'am-x', title: 'Закрыть', onclick: close }, ic('plus', 'ic am-x-ic'));
 function testNote(text) { return TEST ? el('div', { class: 'am-test' }, el('span', { class: 'am-test-dot' }), el('span', {}, text)) : null; }
-function brandMark(size = 'md') { return el('div', { class: 'am-mark ' + size, html: '<svg viewBox="0 0 32 32"><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg>' }); }
+function brandMark(size = 'md') { return el('div', { class: 'am-mark ' + size, html: '<svg viewBox="0 0 64 64"><path d="M14 16h36a5 5 0 0 1 5 5v19a5 5 0 0 1-5 5H28l-9 8v-8h-5a5 5 0 0 1-5-5V21a5 5 0 0 1 5-5z" fill="#fff"/><path d="M18 35c4-9 8-9 11-2s7 6 11-4" fill="none" stroke="#4263eb" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="45.5" cy="25" r="3.2" fill="#ff922b"/></svg>' }); }
 function proMark(size = 'md') { return el('div', { class: 'pro-mark ' + size }, ic('sparkle')); }
 export function proTag() { return ACCOUNTS && !isPro() ? el('span', { class: 'pro-tag' }, 'Про') : null; }
 
