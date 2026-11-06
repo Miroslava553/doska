@@ -52,7 +52,7 @@ for (const f of ['terms.html', 'privacy.html']) { fs.copyFileSync('src/pages/' +
 fs.mkdirSync('dist/lodl', { recursive: true });
 fs.writeFileSync('dist/lodl/index.html', page(jsLodl));
 fs.writeFileSync('dist/lodl/version.json', JSON.stringify({ v: VERSION, notes: releaseFor(true) }));
-for (const f of ['terms.html', 'privacy.html', 'logo.png', 'robots.txt', 'admin.html']) if (fs.existsSync('src/pages/' + f)) fs.copyFileSync('src/pages/' + f, 'dist/lodl/' + f);
+for (const f of ['terms.html', 'privacy.html', 'logo.png', 'favicon.ico', 'robots.txt', 'admin.html']) if (fs.existsSync('src/pages/' + f)) fs.copyFileSync('src/pages/' + f, 'dist/lodl/' + f);
 // Когда домен заработает: MOVE_TO=https://lodl.ru node build.mjs — старый адрес на GitHub переносит доски и ведёт на новый
 if (process.env.MOVE_TO) {
   const to = process.env.MOVE_TO.replace(/\/$/, '');

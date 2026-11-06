@@ -488,7 +488,7 @@ route('POST', /^\/api\/board\/([a-z0-9-]{14})$/, async ({ req, m, user }) => {
 
 // Файлы сайта. На сервере их отдаёт Caddy, а это нужно для проверок и на случай, если Caddy не настроен.
 const STATIC = env.STATIC_DIR || '';
-const TYPES = { '.html': 'text/html; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.txt': 'text/plain; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.json': 'application/json', '.png': 'image/png', '.ico': 'image/x-icon', '.svg': 'image/svg+xml', '.txt': 'text/plain; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css' };
 function serveStatic(req, res, p) {
   const rel = p === '/' ? '/index.html' : decodeURIComponent(p);
   const f = path.join(path.resolve(STATIC), path.normalize(rel).replace(/^([/\\]*\.\.)+/, ''));
@@ -528,7 +528,7 @@ const htmlEsc = (x) => String(x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<':
 function setupPage(token, msg = '') {
   const cur = (k) => (k === 'SECRET_KEY' || k === 'SMTP_PASS' ? '' : env[k] || '');
   const set = (k) => (env[k] ? (k === 'SECRET_KEY' || k === 'SMTP_PASS' ? ' (уже задан, оставьте пустым, чтобы не менять)' : '') : '');
-  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Настройка Lodl</title>
+  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><link rel="icon" href="/favicon.ico"><title>Настройка Lodl</title>
 <style>body{font:16px/1.5 -apple-system,'Segoe UI',Roboto,Arial,sans-serif;background:#f6f7fb;color:#15171a;margin:0;padding:24px}form,.box{max-width:520px;margin:0 auto 16px;background:#fff;border-radius:16px;padding:24px;box-shadow:0 8px 30px rgba(20,30,60,.07)}h1{font-size:22px;margin:0 0 6px}label{display:block;font-weight:600;margin:16px 0 4px;font-size:14px}input[type=text],input[type=password]{width:100%;box-sizing:border-box;padding:11px 12px;border:1px solid #d9dce5;border-radius:10px;font-size:15px}.h{color:#6c727f;font-size:13px}button{margin-top:20px;background:#4c6ef5;color:#fff;border:0;border-radius:10px;padding:13px 20px;font-weight:700;font-size:16px;cursor:pointer}.ok{background:#e8f7ee;color:#11713b;padding:12px 14px;border-radius:10px}code{background:#f1f3f9;padding:2px 6px;border-radius:6px;word-break:break-all}</style></head><body>
 <div class="box"><h1>Настройка Lodl</h1><p class="h">Адрес для уведомлений ЮKassa: <code>${htmlEsc(SITE)}/api/yk/hook</code>. Его нужно вставить в личном кабинете ЮKassa в разделе «Интеграция → HTTP-уведомления» и отметить события payment.succeeded и payment.canceled.</p>${msg ? `<p class="ok">${htmlEsc(msg)}</p>` : ''}</div>
 <form method="post" action="/setup/${htmlEsc(token)}"><b>ЮKassa</b>${FIELDS.slice(0, 2).map(([k, l, h]) => `<label>${l}${set(k)}</label><input ${k === 'SECRET_KEY' ? 'type=password' : 'type=text'} name="${k}" value="${htmlEsc(cur(k))}" autocomplete="off"><div class="h">${h}</div>`).join('')}

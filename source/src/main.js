@@ -12,7 +12,7 @@ import { StrokeBuilder, oneEuro } from './pen.js';
 import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, moveCursor, vertexCursor } from './cursors.js';
 import { ICONS } from './icons.js';
 import { releaseFor } from './changelog.js';
-import { FIGS, figIcon, figPrims } from './figs.js';
+import { FIGS, figIcon, figPrims, WAVE_KINDS } from './figs.js';
 import { SERVER, api, syncRecent, pushBoard, dropBoard, putBoardFolder, dropBoardFolder, boardSync } from './cloud.js';
 import { ACCOUNTS, account, isPro, openPro, openLogin, requirePro, proTag, accountControls, onAccount, inCloud, ownedBoards, PLAN, homePromo, trialNag } from './account.js';
 import { materialsPanel } from './materials.js';
@@ -1548,7 +1548,13 @@ function startBoard(room) {
         startPinch(); return;
       }
       if (penMode || S.tool === 'hand') { gesture = panGesture(e); gesture.touch = true; return; }
-    } else if (gesture) return; // уже рисуем другим указателем
+    } else if (gesture) {
+      // Предыдущее касание не прислало «отпустили» (так бывает у планшетов с пером), а человек уже нажал снова:
+      // тем же указателем или кнопкой прокрутки (правая, колесо). Заканчиваем прошлый штрих и сразу выполняем новое нажатие.
+      const lostUp = gesture.pid === e.pointerId || e.button === 1 || e.button === 2 || (kind === 'pen' && (e.buttons & 2)) || (gesture.kind && gesture.kind !== kind);
+      if (!lostUp || gesture.touch) return; // уже рисуем другим указателем
+      finishGesture();
+    }
     try { cvOver.setPointerCapture(e.pointerId); } catch {}
     hover = { sx: e.clientX, sy: e.clientY, kind };
     lastPtr = { sx: e.clientX, sy: e.clientY, p: 0.5, kind, ev: { shiftKey: e.shiftKey, altKey: e.altKey } };
@@ -1570,7 +1576,7 @@ function startBoard(room) {
     }
     if (!g) return;
     if (spring && !g.pan) spring.used = true;
-    g.pid = e.pointerId; g.touch = kind === 'touch';
+    g.pid = e.pointerId; g.touch = kind === 'touch'; g.kind = kind;
     gesture = g;
     invalidate(false);
   }
@@ -1653,13 +1659,14 @@ function startBoard(room) {
   function onUp(e) {
     if (navGrab && navGrab.up(e)) { if (!navGrab.busy()) navGrab = null; return; }
     if (e.pointerType === 'touch') { touches.delete(e.pointerId); if (pinch && touches.size < 2) { pinch = null; viewChanged(); } }
-    if (gesture && gesture.pid === e.pointerId) {
-      const g = gesture; gesture = null; drawEndAt = performance.now();
-      try { cvOver.releasePointerCapture(e.pointerId); } catch {}
-      if (g.finalPoint && e.type === 'pointerup' && Number.isFinite(e.clientX)) { const q = toWorld(e.clientX, e.clientY); g.finalPoint([q[0], q[1], 0.5]); }
-      g.end(e);
-      invalidate(!g.cheapEnd);
-    }
+    if (gesture && gesture.pid === e.pointerId) finishGesture(e);
+  }
+  function finishGesture(e = null) {
+    const g = gesture; gesture = null; drawEndAt = performance.now();
+    try { cvOver.releasePointerCapture(g.pid); } catch {}
+    if (e && g.finalPoint && e.type === 'pointerup' && Number.isFinite(e.clientX)) { const q = toWorld(e.clientX, e.clientY); g.finalPoint([q[0], q[1], 0.5]); }
+    g.end(e || {});
+    invalidate(!g.cheapEnd);
   }
   function startPinch() {
     const [a, b] = [...touches.values()];
@@ -2238,7 +2245,7 @@ function startBoard(room) {
       if (tool === 'circle') { const r = Math.hypot(x1 - x0, y1 - y0); return { type: 'ellipse', center: true, x: x0 - r, y: y0 - r, w: 2 * r, h: 2 * r }; }
       let w = x1 - x0, h = y1 - y0;
       const aspect = isFig ? FIGS[tool.slice(4)]?.aspect : null;
-      if (isFig && clickOnly()) { const d = 160 / Math.max(S.view.z, 0.5); const hh = aspect ? d * aspect : d; return { type: 'fig', kind: tool.slice(4), x: x0 - d / 2, y: y0 - hh / 2, w: d, h: hh }; }
+      if (isFig && clickOnly()) { let d = 160 / Math.max(S.view.z, 0.5); let hh = aspect ? d * aspect : d; if (WAVE_KINDS.has(tool.slice(4))) { d *= 1.6; hh *= 0.5; } return { type: 'fig', kind: tool.slice(4), x: x0 - d / 2, y: y0 - hh / 2, w: d, h: hh }; }
       if (aspect) { const m = Math.max(Math.abs(w), Math.abs(h) / aspect); w = Math.sign(w || 1) * m; h = Math.sign(h || 1) * m * aspect; }
       if (shift) { const m = Math.max(Math.abs(w), Math.abs(h)); w = Math.sign(w || 1) * m; h = Math.sign(h || 1) * m; }
       const box = { x: Math.min(x0, x0 + w), y: Math.min(y0, y0 + h), w: Math.abs(w), h: Math.abs(h) };
@@ -3477,6 +3484,7 @@ function startBoard(room) {
     if (it.type === 'line' || it.type === 'arrow') { const f = flipX([it.x1, it.x2]); return it.x1 === it.x2 ? null : { x1: f(it.x1), x2: f(it.x2), ...flipCuts(it, f) }; }
     if (it.type === 'fig' && !SOLID_KINDS.has(it.kind) && FIGS[it.kind]) {
       if (['square', 'rhombus', 'triangle', 'eqtriangle', 'pentagon', 'hexagon', 'inscribed', 'circumscribed', 'trapezoid', 'axes'].includes(it.kind)) return null;
+      if (it.kind === 'cosine' && Number.isInteger(it.per || 2)) return null; // косинус из целых волн симметричен: отражать нечего
       return { flip: !it.flip, ...(it.rot ? { rot: -it.rot } : {}), ...flipCuts(it, (x) => it.w - x) };
     }
     return null;
@@ -3535,6 +3543,13 @@ function startBoard(room) {
         if (it.kind !== 'eqtriangle') add('fig:eqtriangle', 'Сделать равносторонним', 'Все стороны равны', () => set({ kind: 'eqtriangle', ...keepBottom(it.w * SQ3) }));
         if (it.kind !== 'triangle') add('fig:triangle', 'Сделать равнобедренным', 'Две боковые стороны равны', () => set({ kind: 'triangle' }));
         if (it.kind !== 'rtriangle') add('fig:rtriangle', 'Сделать прямоугольным', 'С прямым углом', () => set({ kind: 'rtriangle' }));
+      }
+      // волна: больше или меньше периодов, длина одной волны при этом не меняется — рамка растёт или сжимается вправо
+      if (it.type === 'fig' && WAVE_KINDS.has(it.kind)) {
+        const per = it.per || 2;
+        const setPer = (q) => set({ per: q, w: Math.max(4, (it.w * q) / per), ...(it.cuts ? { cuts: null } : {}) });
+        if (per < 8) add('plus', 'Ещё полволны', 'Длина волны та же, график становится длиннее', () => setPer(per + 0.5));
+        if (per > 0.5) add('minus', 'Убрать полволны', 'Длина волны та же, график становится короче', () => setPer(per - 0.5));
       }
       if (it.type === 'poly' && it.closed && it.pts.length === 3) {
         add('fig:eqtriangle', 'Сделать равносторонним', 'Основание остаётся, вершина встаёт на нужную высоту', () => set(triangleFix(it, 'eq')));
@@ -4282,6 +4297,7 @@ function startBoard(room) {
     shapes: { tools: ['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin', 'rect', 'ellipse', 'circle', 'poly', ...FIG_IDS], name: 'Фигуры',
       sections: [['Основные', ['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin', 'rect', 'ellipse', 'circle', 'poly']],
         ['Планиметрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'plane')],
+        ['Тригонометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'wave')],
         ['Стереометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'solid')]] },
     more: { tools: ['note', 'image'], name: 'Ещё', sections: [['', ['note', 'image']]] },
   };

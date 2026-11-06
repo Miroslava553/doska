@@ -19,6 +19,19 @@ const bottomH = (it, h) => ({ h, y: it.y + (it.h - h) * (it.s || 1) }); // ни�
 const centerH = (it, h) => ({ h, y: it.y + ((it.h - h) / 2) * (it.s || 1) });
 const capH = (it, h) => Math.max(4, Math.min(it.w * 20, h));
 const parOff = (it) => (it.ang == null ? 0.28 * it.w : it.h / Math.tan(it.ang * DEG)); // сдвиг верхней стороны
+// Синусоида и косинусоида: ломаная из коротких отрезков, per — сколько волн (периодов) в рамке. y вниз, поэтому минус.
+const WAVE_SEG = 48;
+function wave(per, ph) {
+  const n = Math.max(12, Math.round(WAVE_SEG * per)), out = []; let px = 0, py = 0;
+  for (let i = 0; i <= n; i++) {
+    const x = i / n, y = 0.5 - 0.5 * Math.sin(2 * Math.PI * per * x + ph);
+    if (i) out.push(L(px, py, x, y)); px = x; py = y;
+  }
+  return out;
+}
+// значок в меню: полторы волны в полосе посередине, иначе в квадрате она сжимается в букву W
+const waveIcon = (ph) => wave(1.5, ph).map((p) => ({ ...p, a: [p.a[0], 0.2 + p.a[1] * 0.6, p.a[2], 0.2 + p.a[3] * 0.6] }));
+export const WAVE_KINDS = new Set(['sine', 'cosine']);
 export const FIGS = {
   // ---- планиметрия ----
   scalene: { name: 'Произвольный треугольник', g: 'plane', prims: poly([[0.32, 0], [1, 1], [0, 1]]) },
@@ -44,6 +57,8 @@ export const FIGS = {
   hexagon: { name: 'Правильный шестиугольник', g: 'plane', aspect: Math.sqrt(3) / 2, prims: poly([[0.25, 0], [0.75, 0], [1, 0.5], [0.75, 1], [0.25, 1], [0, 0.5]]) },
   inscribed: { name: 'Вписанная окружность', g: 'plane', aspect: Math.sqrt(3) / 2, prims: [...poly([[0.5, 0], [1, 0.866], [0, 0.866]]), E(0.5, 0.577, 0.289, 0.289)] },
   circumscribed: { name: 'Описанная окружность', g: 'plane', aspect: 1, prims: [...poly([[0.5, 0], [0.933, 0.75], [0.067, 0.75]]), E(0.5, 0.5, 0.5, 0.5)] },
+  sine: { name: 'Синусоида', g: 'wave', prims: wave(2, 0), icon: waveIcon(0), make: (it) => (it.per ? wave(it.per, 0) : null) },
+  cosine: { name: 'Косинусоида', g: 'wave', prims: wave(2, Math.PI / 2), icon: waveIcon(Math.PI / 2), make: (it) => (it.per ? wave(it.per, Math.PI / 2) : null) },
   axes: { name: 'Оси координат', g: 'plane', prims: [AR(0, 0.5, 1, 0.5), AR(0.5, 1, 0.5, 0), T(0.97, 0.56, 'x'), T(0.53, 0.04, 'y'), T(0.46, 0.56, 'O')] },
   // ---- стереометрия (косоугольная проекция, невидимые рёбра пунктиром) ----
   cube: { name: 'Куб / параллелепипед', g: 'solid', prims: [
@@ -137,7 +152,7 @@ export function drawFig(ctx, it) {
 export function figIcon(kind) {
   const f = FIGS[kind]; const P = (u) => (3 + u * 18).toFixed(2);
   let s = '';
-  for (const p of f.prims) {
+  for (const p of f.icon || f.prims) {
     const da = p.d ? ' stroke-dasharray="2 1.8"' : '';
     if (p.t === 'l' || p.t === 'ar') s += `<path d="M${P(p.a[0])} ${P(p.a[1])}L${P(p.a[2])} ${P(p.a[3])}"${da}/>`;
     else if (p.t === 'e') {
