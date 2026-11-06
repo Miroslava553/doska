@@ -520,7 +520,7 @@ function showStart() {
   let wasIn = !!account();
   const off = onAccount(() => { if (!card.isConnected) { off(); return; } renderList(); paintHint(); if (!!account() !== wasIn) { wasIn = !!account(); cloudList(); paintTpl(); } });
   const top = el('header', { class: 'home-top' },
-    el('div', { class: 'home-brand' }, el('span', { class: 'am-mark sm', html: '<svg viewBox="0 0 32 32"><path d="M8 22l3-1 11-11-2-2-11 11z" fill="#fff"/></svg>' }), 'Lodl'),
+    el('div', { class: 'home-brand' }, el('span', { class: 'am-mark sm', html: '<svg viewBox="0 0 32 32"><path d="M10 7v16h15" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><path d="M13 20c4.5 0 7.5-3.5 9.5-11" fill="none" stroke="#ffd43b" stroke-width="2.6" stroke-linecap="round"/></svg>' }), 'Lodl'),
     accountControls());
   // условия, реквизиты и политика: их проверяет платёжный сервис, и они нужны покупателям
   const legal = el('div', { class: 'legal' }, el('a', { href: 'terms.html#prices', target: '_blank', rel: 'noopener' }, 'Lodl Про: 199 ₽ в месяц или 1 990 ₽ в год'), el('span', {}, '·'), el('a', { href: 'terms.html', target: '_blank', rel: 'noopener' }, 'Условия и реквизиты'), el('span', {}, '·'), el('a', { href: 'privacy.html', target: '_blank', rel: 'noopener' }, 'Политика конфиденциальности'));
