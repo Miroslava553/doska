@@ -59,7 +59,7 @@ function trialTimer() {
 setTimeout(trialTimer, 0);
 // Ответ сервера переводим в тот же вид, что хранит тестовый режим, чтобы окна работали одинаково
 const fromServer = (me) => (!me || me.anon ? null : {
-  email: me.email, since: 0, used: me.used, quota: me.quota, gift: me.gift !== false,
+  email: me.email, since: 0, used: me.used, quota: me.quota, gift: me.gift !== false, owner: !!me.owner,
   pro: me.pro ? { trial: !!me.pro.trial, period: me.pro.period, until: me.pro.until, started: me.pro.started, canceled: me.pro.canceled, method: me.pro.method,
     active: me.pro.active, autopay: me.pro.autopay, nextPeriod: me.pro.nextPeriod, failing: me.pro.failing, price: me.pro.price, title: me.pro.title } : null,
 });
@@ -780,6 +780,7 @@ function accountMenu(anchor) {
       pro ? [proMark('sm'), el('div', {}, el('b', {}, 'Про'), el('span', {}, p.trial ? `бесплатно до ${day(p.until)}` : p.canceled ? `до ${day(p.until)}` : `продлится ${day(p.until)}`))]
         : [el('div', {}, el('b', {}, 'Базовый'), el('span', {}, 'бесплатный тариф')), el('button', { class: 'am-btn pro small', onclick: () => { close(); openPro(); } }, 'Про')]),
     item('card', 'Подписка и оплата', manageSub),
+    a.owner ? item('graph', 'Аналитика', () => window.open('/admin.html', '_blank')) : null,
     item('exit', 'Выйти', logout),
     item('trash', 'Удалить аккаунт', () => deleteAccount(), 'danger'),
     TEST ? el('div', { class: 'acc-test' }, 'Тестовый режим') : null);

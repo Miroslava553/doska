@@ -1693,7 +1693,7 @@ function startBoard(room) {
     // Тачпад двумя пальцами: свободно в любую сторону (берём обе оси сразу).
     const k = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? H : 1;
     let dx = e.deltaX * k, dy = e.deltaY * k;
-    const looksLikeMouse = e.deltaMode === 1 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+    const looksLikeMouse = e.deltaMode === 1 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Math.abs(e.deltaY - Math.round(e.deltaY)) < 0.01); // при масштабе экрана колесо даёт почти целые шаги
     if (e.ctrlKey || e.metaKey || (prefs.wheel === 'zoom' && looksLikeMouse && !e.shiftKey)) {
       const pinch = e.ctrlKey && !looksLikeMouse;
       if (pinch) zoomAt(e.clientX, e.clientY, Math.exp(-clamp(dy, -120, 120) * 0.01));
@@ -3013,7 +3013,7 @@ function startBoard(room) {
       const c = cur(); const [lx, ly] = localOf(e.clientX, e.clientY);
       const k = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? H : 1;
       const dx = e.deltaX * k, dy = e.deltaY * k;
-      const looksLikeMouse = e.deltaMode === 1 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Number.isInteger(e.deltaY));
+      const looksLikeMouse = e.deltaMode === 1 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50 && Math.abs(e.deltaY - Math.round(e.deltaY)) < 0.01); // при масштабе экрана колесо даёт почти целые шаги
       if (e.ctrlKey || e.metaKey || looksLikeMouse) {
         const f = e.ctrlKey && !looksLikeMouse ? Math.exp(clamp(dy, -60, 60) * 0.01) : dy > 0 ? 1.2 : 1 / 1.2;
         zoom(f, clamp(lx / c.w, 0, 1), clamp(ly / c.h, 0, 1));
@@ -3116,6 +3116,7 @@ function startBoard(room) {
           if (ghost && inp.value) { lines.push(inp.value); cols.push(nextColor()); off.push(false); writeRows(); const c = inp.selectionStart; buildRows(i, c); return; }
           if (!ghost) { lines[i] = inp.value; writeRows(); refresh(); }
         });
+        inp.addEventListener('blur', () => { if (inp.isConnected) setTimeout(() => paintErrs(true)); });
         inp.addEventListener('focus', () => { lastFocus = i; if (ghost && lines.length && !lines[lines.length - 1].trim()) focusRow(lines.length - 1); }); // пустая строка уже есть — пишем в неё
         inp.addEventListener('keydown', (e) => {
           if (e.key === 'Enter') {
@@ -3151,10 +3152,21 @@ function startBoard(room) {
       swatchMenu.style.left = dr.left - pr.left + 'px'; swatchMenu.style.top = dr.bottom - pr.top + 6 + 'px';
     }
     // ошибки по строкам и ползунки параметров — после каждой правки
-    let parKey = null;
+    let parKey = null, errTimer = 0;
+    // Пока человек печатает в строке, новую ошибку не показываем: «x^» ещё не ошибка, а недописанная запись.
+    // Ошибка появляется после паузы или при уходе из строки. Исправленная строка очищается сразу.
+    function paintErrs(now = false) {
+      clearTimeout(errTimer); let later = false;
+      rowEls.forEach((r, i) => {
+        const m = i < lines.length && lines[i].trim() ? errAt(i) : '';
+        if (m && !now && !r.err.textContent && document.activeElement === r.inp) { later = true; return; }
+        r.err.textContent = m; r.inp.classList.toggle('bad', !!m);
+      });
+      if (later) errTimer = setTimeout(() => { if (p.isConnected) paintErrs(true); }, 1200);
+    }
     function refresh() {
       const c = cur(); if (!c) return;
-      rowEls.forEach((r, i) => { const m = i < lines.length && lines[i].trim() ? errAt(i) : ''; r.err.textContent = m; r.inp.classList.toggle('bad', !!m); });
+      paintErrs();
       const pars = graphPars(graphRows(c)).sort();
       const key = pars.join(',');
       if (key !== parKey) { parKey = key; buildPars(pars); }

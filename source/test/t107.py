@@ -30,7 +30,9 @@ with sync_playwright() as p:
     r('пять строк: %s' % rows, len(rows) == 5)
     r('у строк разные цвета', len(set(g['cols'])) == 5)
     pg.keyboard.press('Enter'); pg.keyboard.type('sin(x'); pg.wait_for_timeout(150)
-    r('ошибка видна под своей строкой', pg.locator('.gerr').filter(has_text='скобка').count() == 1)
+    r('пока печатают, недописанная строка не красная', pg.locator('.gerr').filter(has_text='скобка').count() == 0)
+    pg.wait_for_timeout(1300)
+    r('после паузы ошибка видна под своей строкой', pg.locator('.gerr').filter(has_text='скобка').count() == 1)
     pg.screenshot(path=OUT + '1-rows.png')
     # ошибка в одной строке не ломает остальные: на холсте нарисованы кривые
     r('остальные строки рисуются, хотя в шестой ошибка', D("""() => { const D = window.__doska; const it = [...D.items.values()].find((i) => i.type === 'graph'); const [a, b] = D.toScreen(it.x + 100, it.y + 100); return true; }"""))

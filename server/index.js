@@ -89,6 +89,7 @@ function meJson(user) {
   const used = q('SELECT COALESCE(SUM(size),0) AS n FROM blobs WHERE user = ?').get(user).n + q("SELECT COALESCE(SUM(size),0) AS n FROM kv WHERE user = ? AND coll IN ('files','tpls')").get(user).n;
   return {
     email: u.email, used, quota: QUOTA,
+    owner: OWNERS().has(u.email) || undefined, // владельцу в меню аккаунта показывается «Аналитика»
     gift: !giftOf(u.email),
     pro: s && s.until ? {
       active, trial: !!s.trial, period: s.period, until: s.until, canceled: !!s.canceled, autopay: AUTOPAY && !!s.pm_id && !s.trial,
