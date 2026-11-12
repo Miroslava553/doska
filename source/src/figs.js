@@ -1,4 +1,4 @@
-import { SOLID_KINDS, solidView, drawSolid, solidAspect } from './solid.js';
+import { SOLID_KINDS, solidView, drawSolid, solidAspect, convexHull } from './solid.js';
 // Готовые фигуры в единичном квадрате [0..1]×[0..1] (y вниз). d — пунктир (невидимое ребро).
 const L = (x1, y1, x2, y2, d = false) => ({ t: 'l', a: [x1, y1, x2, y2], d });
 const E = (cx, cy, rx, ry, a0 = 0, a1 = Math.PI * 2, d = false) => ({ t: 'e', a: [cx, cy, rx, ry, a0, a1], d });
@@ -117,8 +117,48 @@ export function figSegments(it) {
   return segs;
 }
 
+// ---------- заливка ----------
+// Закрасить можно плоские фигуры (замкнутые контуры из их линий и окружности) и тела (по силуэту).
+// Оси и волны не замкнуты, у них заливки нет.
+export const figFillable = (it) => { const f = FIGS[it.kind]; return !!f && (SOLID_KINDS.has(it.kind) || (f.g === 'plane' && it.kind !== 'axes')); };
+const area2 = (p) => { let a = 0; for (let i = 0; i < p.length; i++) { const q = p[(i + 1) % p.length]; a += p[i][0] * q[1] - q[0] * p[i][1]; } return a; };
+export function figFillPath(it) {
+  if (!figFillable(it) || typeof Path2D === 'undefined') return null;
+  const P = new Path2D();
+  // все контуры обходим в одну сторону: тогда пересечение (круг внутри треугольника) закрашивается один раз, без дырки
+  const addPoly = (pts) => { if (pts.length < 3) return; if (area2(pts) < 0) pts = pts.slice().reverse(); P.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) P.lineTo(pts[i][0], pts[i][1]); P.closePath(); };
+  if (SOLID_KINDS.has(it.kind)) { addPoly(convexHull(solidView(it).lines.flatMap((l) => l.pts))); return P; }
+  const { w, h } = it, key = (x, y) => Math.round(x * 1e4) + ',' + Math.round(y * 1e4);
+  const segs = [];
+  for (const p of figPrims(it)) {
+    if (p.t === 'l') segs.push([p.a[0] * w, p.a[1] * h, p.a[2] * w, p.a[3] * h]);
+    else if (p.t === 'e' && Math.abs(p.a[5] - p.a[4]) >= Math.PI * 2 - 1e-6) {
+      const [cx, cy, rx, ry] = p.a; P.moveTo(cx * w + Math.abs(rx * w), cy * h); P.ellipse(cx * w, cy * h, Math.abs(rx * w), Math.abs(ry * h), 0, 0, Math.PI * 2);
+    }
+  }
+  // отрезки сцепляем конец к началу; что замкнулось — контур
+  const used = new Array(segs.length).fill(false);
+  for (let i = 0; i < segs.length; i++) {
+    if (used[i]) continue; used[i] = true;
+    const loop = [[segs[i][0], segs[i][1]], [segs[i][2], segs[i][3]]]; const start = key(segs[i][0], segs[i][1]);
+    for (let guard = 0; guard < segs.length; guard++) {
+      const [lx, ly] = loop[loop.length - 1]; if (key(lx, ly) === start) break;
+      const j = segs.findIndex((q, k) => !used[k] && (key(q[0], q[1]) === key(lx, ly) || key(q[2], q[3]) === key(lx, ly)));
+      if (j < 0) break; used[j] = true; const q = segs[j];
+      loop.push(key(q[0], q[1]) === key(lx, ly) ? [q[2], q[3]] : [q[0], q[1]]);
+    }
+    const e = loop[loop.length - 1];
+    if (loop.length > 3 && key(e[0], e[1]) === start) addPoly(loop.slice(0, -1));
+  }
+  return P;
+}
+function paintFigFill(ctx, it) {
+  const fp = it.fill && figFillPath(it); if (!fp) return;
+  ctx.save(); ctx.fillStyle = it.color; ctx.globalAlpha *= it.fo ?? 0.22; ctx.fill(fp); ctx.restore();
+}
 export function drawFig(ctx, it) {
   const f = FIGS[it.kind]; if (!f) return;
+  paintFigFill(ctx, it);
   if (SOLID_KINDS.has(it.kind)) { drawSolid(ctx, it); return; } // стереометрия — по трёхмерной модели
   const { w, h } = it;
   const dash = [Math.max(4, it.size * 3), Math.max(3, it.size * 2.5)];

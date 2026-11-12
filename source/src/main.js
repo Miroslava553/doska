@@ -5,14 +5,17 @@ import {
   decodePts, encodePts, strokeOptions, outlinePath, paintInk, localBox, worldBox, geomWorldBox, itemTransform, hitItem, distSeg,
   drawItem, drawBackground, setAsyncLoad, setShadePeek, fitShade, hwGeom, texImage, FONT, GRID, shapePolys, ERASABLE_SHAPES, rotOf, rotCenter, bakeShape, SCALE_BAKED,
   CUTTABLE, inCuts, scaleCuts, rotPt,
-  graphRows, graphPars, graphView, graphPick, graphPois, fmtCoord, GRAPH_COLORS,
+  graphRows, graphPars, graphView, graphPick, graphPois, fmtCoord, GRAPH_COLORS, FILL_ALPHA,
 } from './render.js';
 import { SOLID_KINDS, prepared, reproject, moveVertex, viewOf, solidHandles, solidEdges, regularSolid } from './solid.js';
 import { StrokeBuilder, oneEuro } from './pen.js';
 import { penCursor, eraserCursor, rotateCursor, selectCursor, resizeCursor, moveCursor, vertexCursor } from './cursors.js';
 import { ICONS } from './icons.js';
 import { releaseFor } from './changelog.js';
-import { FIGS, figIcon, figPrims, WAVE_KINDS } from './figs.js';
+import { FIGS, figIcon, figPrims, WAVE_KINDS, figFillable } from './figs.js';
+// что можно закрасить: прямоугольник, эллипс, замкнутый многоугольник, плоские фигуры и тела из меню фигур
+const fillableItem = (i) => i.type === 'rect' || i.type === 'ellipse' || (i.type === 'poly' && i.closed) || (i.type === 'fig' && figFillable(i));
+const isFilled = (i) => !!i.fill && fillableItem(i);
 import { SERVER, api, syncRecent, pushBoard, dropBoard, putBoardFolder, dropBoardFolder, boardSync } from './cloud.js';
 import { ACCOUNTS, account, isPro, openPro, openLogin, requirePro, proTag, accountControls, onAccount, inCloud, ownedBoards, PLAN, homePromo, trialNag } from './account.js';
 import { materialsPanel } from './materials.js';
@@ -792,6 +795,64 @@ function startBoard(room) {
   const toasts = el('div', { class: 'toasts' });
   const layer = el('div', { class: 'layer' }); // редакторы текста и т.п.
   app.append(cvMain, cvOver, layer, topLeft, toolbar, topRight, selBar, toasts);
+
+  // ---------- ползунок справа: листать длинный урок, не крутя колесо ----------
+  // Показывает, где экран внутри всего, что написано на листе. Тянешь — доска едет; щелчок по дорожке — на экран вверх или вниз.
+  // Только там, где есть мышь: на телефоне и планшете лист и так листают пальцем.
+  const vbar = el('div', { class: 'vscroll', hidden: true }, el('div', { class: 'vthumb' }));
+  const vthumb = vbar.firstChild;
+  app.append(vbar);
+  const FINE = matchMedia('(any-pointer: fine)');
+  let sbArr = null, sbB = null, sbDrag = null;
+  function contentY() {
+    const a = pageItems();
+    if (a !== sbArr) { sbArr = a; sbB = null; for (const it of a) { const w = worldBox(it); sbB = sbB ? [Math.min(sbB[0], w[1]), Math.max(sbB[1], w[3])] : [w[1], w[3]]; } }
+    return sbB;
+  }
+  function vRange() { // мир по вертикали: что видно [v0, v1] и докуда можно листать [t0, t1]
+    const z = S.view.z, v0 = -S.view.y / z, v1 = (H - S.view.y) / z, c = contentY();
+    if (!c) return null;
+    // ниже последней записи оставляем полэкрана: там пишут дальше
+    return { v0, v1, t0: Math.min(v0, c[0] - 40 / z), t1: Math.max(v1, c[1] + (v1 - v0) * 0.5) };
+  }
+  function vGeom(r, L) { const span = r.t1 - r.t0, vis = r.v1 - r.v0; const th = Math.min(L, Math.max(36, (L * vis) / span)); return { span, vis, th, k: span - vis > 1e-9 ? (L - th) / (span - vis) : 0 }; }
+  function placeVbar() {
+    const r = sbDrag ? { ...sbDrag.r, v0: -S.view.y / S.view.z, v1: (H - S.view.y) / S.view.z } : vRange();
+    if (!FINE.matches || !r) { vbar.hidden = true; return; }
+    // не залезаем под верхние кнопки, под масштаб внизу и под панель инструментов, если она справа
+    let zb; try { zb = zoomBar.getBoundingClientRect(); } catch { return; } // панель масштаба создаётся позже, при самой первой отрисовке её ещё нет
+    const tr = topRight.getBoundingClientRect(), tb = toolbar.getBoundingClientRect();
+    const right = toolbar.classList.contains('vert') && tb.left > W / 2 ? W - tb.left + 6 : 8; // чуть отступаем от края экрана
+    const top = Math.max(60, tr.bottom + 8), bottom = Math.max(70, zb.height ? H - zb.top + 8 : 70);
+    vbar.style.right = right + 'px'; vbar.style.top = top + 'px'; vbar.style.bottom = bottom + 'px';
+    vbar.hidden = false;
+    const L = Math.max(40, H - top - bottom), g = vGeom(r, L);
+    vthumb.style.height = g.th + 'px';
+    vthumb.style.transform = `translateY(${clamp((r.v0 - r.t0) * g.k, 0, L - g.th)}px)`;
+    vbar.classList.toggle('full', g.k === 0);
+  }
+  vthumb.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return; e.preventDefault(); e.stopPropagation();
+    const r = vRange(); if (!r) return;
+    sbDrag = { r, y0: e.clientY, vy: S.view.y }; vbar.classList.add('drag');
+    try { vthumb.setPointerCapture(e.pointerId); } catch {}
+  });
+  vthumb.addEventListener('pointermove', (e) => {
+    if (!sbDrag) return;
+    const r = sbDrag.r, g = vGeom(r, vbar.clientHeight); if (!g.k) return;
+    // сдвиг ползунка в пикселях → сдвиг листа в мире; дальше краёв листа не уезжаем
+    const z = S.view.z, v0 = -sbDrag.vy / z, nv0 = clamp(v0 + (e.clientY - sbDrag.y0) / g.k, r.t0, r.t1 - g.vis);
+    S.view.y = -nv0 * z; viewChanged();
+  });
+  const endV = () => { if (!sbDrag) return; sbDrag = null; vbar.classList.remove('drag'); invalidate(false); };
+  vthumb.addEventListener('pointerup', endV); vthumb.addEventListener('pointercancel', endV); vthumb.addEventListener('lostpointercapture', endV);
+  vbar.addEventListener('pointerdown', (e) => { // щелчок по дорожке: на экран выше или ниже
+    if (e.target !== vbar || e.button !== 0) return; e.preventDefault();
+    const tb = vthumb.getBoundingClientRect();
+    S.view.y += (e.clientY < tb.top ? 1 : -1) * H * 0.85; viewChanged();
+  });
+  vbar.addEventListener('wheel', (e) => { e.preventDefault(); S.view.y -= e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY; viewChanged(); }, { passive: false });
+  FINE.addEventListener?.('change', () => invalidate(false));
   const unpinSelBar = () => { selBar._pin = null; };
   cvOver.addEventListener('pointerdown', unpinSelBar, true); addEventListener('keydown', unpinSelBar, true);
   document.body.append(app);
@@ -863,7 +924,7 @@ function startBoard(room) {
       for (const id of pendingAppend) { const it = items.get(id); if (it && it.page === S.page) drawItem(ctx, it, null, v.z); }
       pendingAppend = [];
     }
-    if (dirtyOver) { dirtyOver = false; renderOver(); placeSelBar(); pvMaybeSend(); }
+    if (dirtyOver) { dirtyOver = false; renderOver(); placeSelBar(); placeVbar(); pvMaybeSend(); }
     if (mat && S.sel.size !== matSelN) { matSelN = S.sel.size; mat.selectionChanged(); }
   }
   var mat = null, matSelN = 0; // «Материалы» — панель создаётся ниже
@@ -1996,7 +2057,7 @@ function startBoard(room) {
           const thin = it.kind === 'pen' ? (it.thin ?? 0.5) : 0;
           hit = clipOut(decodePts(it), lx, ly, lr, (p) => it.size * Math.max(0.05, 0.5 - thin * (0.5 - p))).changed;
         } else {
-          const filled = it.fill && (it.type === 'rect' || it.type === 'ellipse' || (it.type === 'poly' && it.closed));
+          const filled = isFilled(it);
           hit = (filled && hitItem(it, wx, wy, 0)) || shapePolys(it).polys.some((pc) => clipOut(pc.pts, lx, ly, lr, () => pc.w / 2).changed);
         }
         if (hit) st.hidden.add(it.id);
@@ -2023,7 +2084,7 @@ function startBoard(room) {
         const hw = (p) => it.size * Math.max(0.05, 0.5 - thin * (0.5 - (p ?? 1)));
         g = { polys: [{ pts: decodePts(it), hw, max: it.size / 2 }] };
       } else if (ERASABLE_SHAPES.has(it.type)) {
-        g = { polys: shapePolys(it).polys.map((pc) => ({ pts: pc.pts, hw: () => pc.w / 2, max: pc.w / 2 })), fill: !!(it.fill && (it.type === 'rect' || it.type === 'ellipse' || (it.type === 'poly' && it.closed))) };
+        g = { polys: shapePolys(it).polys.map((pc) => ({ pts: pc.pts, hw: () => pc.w / 2, max: pc.w / 2 })), fill: isFilled(it) };
       } else g = { other: true };
       g.box = localBox(it); g.max = g.polys ? Math.max(0, ...g.polys.map((pc) => pc.max)) : 0;
       cache.set(it.id, g); return g;
@@ -2115,7 +2176,7 @@ function startBoard(room) {
     } else {
       const plain = rotOf(it) ? { ...it, rot: 0, _lb: undefined } : it;
       for (const pc of shapePolys(plain).polys) line(pc.pts, () => pc.w / 2);
-      const filled = it.fill && (it.type === 'rect' || it.type === 'ellipse' || (it.type === 'poly' && it.closed));
+      const filled = isFilled(it);
       if (filled) { const b = contentBox(it), st = Math.max(1, Math.min(b[2] - b[0], b[3] - b[1]) / 40); for (let x = b[0]; x <= b[2]; x += st) for (let y = b[1]; y <= b[3]; y += st) if (hitItem({ ...plain, x: 0, y: 0, s: 1, cuts: undefined }, x, y, 0)) out.push([x, y]); }
     }
     it._ink = out; return out;
@@ -2471,7 +2532,7 @@ function startBoard(room) {
       const x0 = Math.min(...W.map((q) => q[0])), y0 = Math.min(...W.map((q) => q[1]));
       const out = { id: it.id, type: 'poly', page: it.page, z: it.z, x: x0, y: y0, s: 1, color: it.color, size: it.size, closed: it.type === 'poly' ? !!it.closed : true, pts: W.map(([x, y]) => [x - x0, y - y0]) };
       if (it.dash) { out.dash = true; if (it.doff) out.doff = it.doff; if (it.dfig) out.dfig = true; }
-      if (it.fill) out.fill = true;
+      if (it.fill) { out.fill = true; if (it.fo != null) out.fo = it.fo; }
       const fk = it.type === 'fig' ? it.kind : it.type === 'rect' ? 'rect' : it.fk; if (fk) out.fk = fk;
       return out;
     };
@@ -3616,6 +3677,15 @@ function startBoard(room) {
       add('minus', 'Уменьшить', 'Уменьшить выделенное целиком, пропорции сохраняются', () => scaleSel(SCALE_STEP_DOWN));
       add('plus', 'Увеличить', 'Увеличить выделенное целиком, пропорции сохраняются', () => scaleSel(SCALE_STEP_UP));
     }
+    { // заливка полупрозрачным цветом линии: под ней видно и клетки, и надписи
+      const fl = its.filter((i) => fillableItem(i) && !i.locked);
+      if (fl.length) {
+        const on = fl.every((i) => i.fill);
+        // закрашено — кнопка открывает прозрачность и «Убрать заливку»; нет — сразу закрашивает
+        if (on) add('fill', 'Заливка', 'Прозрачность заливки или убрать её', (e) => fillPop(e?.currentTarget, fl), 'on');
+        else add('fill', 'Закрасить', 'Закрасить фигуру цветом её линии', () => act(() => { for (const i of fl) setFields(i.id, { fill: true }); }));
+      }
+    }
     const dashable = (i) => ['line', 'arrow', 'rect', 'ellipse', 'poly'].includes(i.type);
     if (its.some(dashable)) add('dash', its.filter(dashable).every((i) => i.dash) ? 'Сплошная линия' : 'Пунктир', 'Сплошная / пунктир', () => act(() => { const v = !its.filter(dashable).every((i) => i.dash); for (const i of its) if (dashable(i)) setFields(i.id, { dash: v }); }));
     add('trash', 'Удалить', 'Delete', deleteSelection, 'danger');
@@ -3624,6 +3694,24 @@ function startBoard(room) {
     if (ACCOUNTS && tutorView() && !its.some((i) => i.type === 'shade')) add('eyeOff', 'Скрыть ответ', 'Закрыть выделенное шторкой', hideAnswer);
     add('lock', its.every((i) => i.locked) ? 'Открепить' : 'Закрепить', 'Закреплённое нельзя случайно сдвинуть, выделить рамкой или стереть — Shift+L', toggleLock);
     return A;
+  }
+  // окно заливки: прозрачность (ползунок, одним шагом отмены) и «Убрать заливку»
+  function fillPop(anchor, fl) {
+    const ids = fl.map((i) => i.id);
+    // показываем именно прозрачность: 0% — сплошная заливка, 95% — едва заметная (внутри храним плотность fo)
+    const get = () => Math.round((1 - (items.get(ids[0])?.fo ?? FILL_ALPHA)) * 100);
+    const val = el('span', { class: 'sz-val' }, get() + '%');
+    const range = el('input', { type: 'range', class: 'sz-range', min: 0, max: 95, step: 1, value: get() });
+    let dragging = false;
+    const begin = () => { if (dragging) return; dragging = true; undo.stopCapturing(); undo.captureTimeout = 1e9; };
+    const finish = () => { if (!dragging) return; dragging = false; undo.captureTimeout = 0; undo.stopCapturing(); };
+    range.addEventListener('pointerdown', begin);
+    range.addEventListener('input', () => { begin(); const v = Math.round(100 - +range.value) / 100; act(() => { for (const id of ids) if (items.get(id)) setFields(id, { fo: v }); }); val.textContent = range.value + '%'; });
+    // фокус не держим: Ctrl+Z и клавиши инструментов сразу работают на доске
+    range.addEventListener('change', () => { finish(); range.blur(); }); range.addEventListener('pointerup', finish); range.addEventListener('blur', finish);
+    const off = el('button', { class: 'btn fill-off', onclick: () => { finish(); act(() => { for (const id of ids) if (items.get(id)) setFields(id, { fill: false }); }); closePopovers(); } }, 'Убрать заливку');
+    const body = el('div', { class: 'fill-pop' }, el('div', { class: 'mh' }, 'Прозрачность заливки'), el('div', { class: 'sz-row' }, range, val), off);
+    if (anchor && anchor.isConnected) popover(anchor, body); else popoverAt((lastPtr?.sx ?? W / 2) + 8, (lastPtr?.sy ?? H / 2) + 8, body);
   }
   // толщина выделенного (как её показывает ползунок пера: у фигур хранится ×0,9)
   const SIZED_SHAPES = ['line', 'arrow', 'rect', 'ellipse', 'fig', 'poly'];
@@ -3684,7 +3772,7 @@ function startBoard(room) {
     }
     const acts = selectionActions(its);
     acts.forEach((a, i) => {
-      selBar.append(el('button', { class: 'ibtn sq ' + a.cls, title: a.label + ((a.title || '').match(/(Ctrl\S*|Shift\+\S+|Delete)$/) ? ' (' + a.title.match(/(Ctrl\S*|Shift\+\S+|Delete)$/)[1] + ')' : ''), onclick: (e) => { e.stopPropagation(); a.f(); } }, el('span', { class: 'ic', html: actIcon(a.ic) })));
+      selBar.append(el('button', { class: 'ibtn sq ' + a.cls, title: a.label + ((a.title || '').match(/(Ctrl\S*|Shift\+\S+|Delete)$/) ? ' (' + a.title.match(/(Ctrl\S*|Shift\+\S+|Delete)$/)[1] + ')' : ''), onclick: (e) => { e.stopPropagation(); a.f(e); } }, el('span', { class: 'ic', html: actIcon(a.ic) })));
     });
     selBar.hidden = false;
     placeSelBar();
@@ -4713,16 +4801,12 @@ function startBoard(room) {
     const d = modal('Кнопки на панели', el('div', { class: 'bs' }, list, el('div', { class: 'bs-foot' }, reset, el('button', { class: 'btn primary', onclick: () => d.close() }, 'Готово'))));
     d.m.querySelector('.dialog').classList.add('bs-dialog');
   }
-  function toggleFullscreen() {
-    if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.({ navigationUI: 'hide' }).catch(() => toast('Браузер не разрешил полный экран — нажмите F11'));
-  }
 
-  // правый верх: статус связи, слежение, масштаб, полный экран
+  // правый верх: статус связи, ссылка, слежение, материалы, выход (полный экран убран: есть F11, а кнопка мешала лаконичности)
   const statusBtn = el('button', { class: 'status', onclick: () => showConnect() });
   const followBtn = el('button', { class: 'tbtn', title: 'Смотреть туда же, куда собеседник — Shift+F', onclick: () => toggleFollow() }, icon('eye'));
   const summonBtn = el('button', { class: 'tbtn', title: 'Позвать собеседника к себе — Shift+S', onclick: () => summon() }, icon('summon'));
   const zoomBtn = el('button', { class: 'zoom', title: 'Показать всё (Shift+1)', onclick: fitContent });
-  const fsBtn = el('button', { class: 'tbtn fs-btn', title: 'Полный экран (помогает, если планшет не рисует у нижнего края)', onclick: toggleFullscreen }, icon('full'));
   const exitBtn = el('button', { class: 'tbtn', title: 'К списку досок (всё уже сохранено)', onclick: () => { location.hash = ''; location.reload(); } }, icon('exit'));
   // Ссылка для собеседника: одна кнопка — ссылка на эту доску уже в буфере, остаётся вставить в мессенджер
   const shareLink = () => location.protocol.startsWith('http') ? location.origin + location.pathname + '#r=' + room : null;
@@ -4737,7 +4821,7 @@ function startBoard(room) {
   const matBtn = el('button', { class: 'tbtn', title: 'Материалы. Картинки, PDF и заготовки по папкам', onclick: () => mat.toggle() }, icon('folder'), el('span', { class: 'tlock', html: ICONS.lock }));
   const paintMatBtn = () => matBtn.classList.toggle('pro-locked', ACCOUNTS && !isPro());
   paintMatBtn(); onAccount(paintMatBtn);
-  topRight.append(...[rolePill, statusBtn, shareBtn, followBtn, ACCOUNTS ? matBtn : null, fsBtn, el('div', { class: 'sep' }), exitBtn].filter(Boolean));
+  topRight.append(...[rolePill, statusBtn, shareBtn, followBtn, ACCOUNTS ? matBtn : null, el('div', { class: 'sep' }), exitBtn].filter(Boolean));
   // до конца подарка Про семь дней и меньше: напоминаем при каждом открытии доски
   setTimeout(() => {
     const n = ACCOUNTS && trialNag(); if (!n) return;

@@ -1,7 +1,8 @@
 // Геометрия и рисование объектов доски.
 import { getStroke } from 'perfect-freehand';
 import { compileMany, compileRows } from './expr.js';
-import { figSegments, drawFig, FIGS, figPrims, rightMarkPts } from './figs.js';
+import { figSegments, drawFig, FIGS, figPrims, rightMarkPts, figFillPath } from './figs.js';
+const HIT = typeof document !== 'undefined' ? document.createElement('canvas').getContext('2d') : null; // для «точка внутри заливки»
 import { SOLID_KINDS, solidView } from './solid.js';
 
 export const FONT = '"Segoe UI", system-ui, -apple-system, Roboto, Arial, sans-serif';
@@ -298,6 +299,7 @@ export function hitItem(it, wx, wy, tol) {
     }
     case 'line': case 'arrow': return distSeg(px, py, it.x1, it.y1, it.x2, it.y2) <= t + it.size / 2 + 2;
     case 'fig': {
+      if (it.fill && HIT) { const fp = figFillPath(it); if (fp && HIT.isPointInPath(fp, px, py)) return true; }
       if (!it._segs) it._segs = figSegments(it);
       const r = t + it.size / 2 + 2;
       return it._segs.some((q) => distSeg(px, py, q[0], q[1], q[2], q[3]) <= r);
@@ -332,6 +334,7 @@ function niceStep(raw) {
 function fmt(v) { const r = Math.round(v * 1e6) / 1e6; return String(r).replace('.', ',').replace('-', '−'); }
 // координата для подписи точки: два знака после запятой, без «−0»
 export function fmtCoord(v) { let r = Math.round(v * 100) / 100; if (Object.is(r, -0) || Math.abs(r) < 1e-9) r = 0; return String(r).replace('.', ',').replace('-', '−'); }
+export const FILL_ALPHA = 0.22; // заливка фигур по умолчанию — полупрозрачная, под ней видно клетки и надписи
 export const GRAPH_COLORS = ['#1971c2', '#e03131', '#2f9e44', '#9c36b5', '#f08c00', '#0c8599', '#1e1e1e'];
 export const rowColor = (it, i) => (it.cols && it.cols[i]) || GRAPH_COLORS[i % 6];
 // Красивая запись для легенды: x^2 → x², >= → ≥, sqrt → √, * → ·
@@ -901,7 +904,7 @@ export function drawItem(ctx, it, ov, scale, pieces, opt) {
       ctx.beginPath();
       if (it.type === 'rect') ctx.rect(0, 0, it.w, it.h);
       else ctx.ellipse(it.w / 2, it.h / 2, Math.abs(it.w / 2), Math.abs(it.h / 2), 0, 0, Math.PI * 2);
-      if (it.fill) { ctx.globalAlpha = 0.22; ctx.fill(); ctx.globalAlpha = 1; }
+      if (it.fill) { const ga = ctx.globalAlpha; ctx.globalAlpha = ga * (it.fo ?? FILL_ALPHA); ctx.fill(); ctx.globalAlpha = ga; }
       ctx.stroke(); ctx.setLineDash([]);
       if (it.center) { ctx.beginPath(); ctx.arc(it.w / 2, it.h / 2, Math.max(2, it.size), 0, Math.PI * 2); ctx.fill(); }
       break;
@@ -910,7 +913,7 @@ export function drawItem(ctx, it, ov, scale, pieces, opt) {
     case 'poly': {
       ctx.lineWidth = it.size; if (it.dash) { ctx.setLineDash(it.dfig ? [Math.max(4, it.size * 3), Math.max(3, it.size * 2.5)] : [it.size * 3, it.size * 2.5]); ctx.lineDashOffset = it.doff || 0; }
       ctx.beginPath(); it.pts.forEach(([x, y], i) => (i ? ctx.lineTo(x, y) : ctx.moveTo(x, y))); if (it.closed) ctx.closePath();
-      if (it.fill && it.closed) { ctx.globalAlpha = 0.22; ctx.fill(); ctx.globalAlpha = 1; }
+      if (it.fill && it.closed) { const ga = ctx.globalAlpha; ctx.globalAlpha = ga * (it.fo ?? FILL_ALPHA); ctx.fill(); ctx.globalAlpha = ga; }
       ctx.stroke(); ctx.setLineDash([]);
       if (it.fk === 'rtriangle' && it.closed && it.pts.length === 3) rightMark(ctx, it);
       break;
