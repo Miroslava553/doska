@@ -43,7 +43,8 @@ with sync_playwright() as p:
     pg.mouse.move(700, 400); pg.mouse.down(); pg.mouse.move(800, 400, steps=5); pg.mouse.up()
     pg.mouse.wheel(0, 300); pg.wait_for_timeout(100)
     v1 = pg.evaluate(f"() => {{ const v = {D}.S.view; return [v.x, v.y]; }}")
-    r('прокрутка сразу после штриха не двигает доску', v1 == pg.evaluate(f"() => [{D}.S.view.x, {D}.S.view.y]") and abs(v1[1] - v0[1]) < 1)
+    # «взмах» после штриха бывает только у пера (это проверяет t123); после мыши колесо работает сразу
+    r('после штриха мышью колесо сразу двигает доску', abs(v1[1] - v0[1]) >= 1)
     pg.wait_for_timeout(900); pg.mouse.wheel(0, 300); pg.wait_for_timeout(200)
     v2 = pg.evaluate(f"() => [{D}.S.view.x, {D}.S.view.y]")
     r('обычная прокрутка через секунду работает', abs(v2[1] - v1[1]) > 50)

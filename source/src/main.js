@@ -792,6 +792,8 @@ function startBoard(room) {
   const toasts = el('div', { class: 'toasts' });
   const layer = el('div', { class: 'layer' }); // редакторы текста и т.п.
   app.append(cvMain, cvOver, layer, topLeft, toolbar, topRight, selBar, toasts);
+  const unpinSelBar = () => { selBar._pin = null; };
+  cvOver.addEventListener('pointerdown', unpinSelBar, true); addEventListener('keydown', unpinSelBar, true);
   document.body.append(app);
   let W = 0, H = 0, DPR = 1;
   function resize() {
@@ -1489,7 +1491,10 @@ function startBoard(room) {
   }
 
   // ---------- ввод ----------
-  let gesture = null, hover = null, penSeenAt = 0, drawEndAt = -1e9;
+  let gesture = null, hover = null, penSeenAt = 0, drawEndAt = -1e9, drawEndKind = '';
+  // Колесо (или правую кнопку мыши) нажали, не отпустив левую: браузер не присылает нового нажатия, только движение
+  // с другим набором кнопок. Пока колесо зажато, двигаем доску, а начатое дело (перенос, рамка, линия) ждёт и потом продолжается.
+  let chordPan = null;
   const touches = new Map();
   let pinch = null;
   function readPoint(e, kind) {
@@ -1633,6 +1638,14 @@ function startBoard(room) {
     const kind = e.pointerType;
     if (gesture && gesture.pid === e.pointerId) {
       e.preventDefault();
+      if (kind === 'mouse' && !gesture.pan) {
+        const want = (e.buttons & 4) || (e.buttons & 2);
+        if (want && !chordPan) chordPan = panGesture({ clientX: e.clientX, clientY: e.clientY, button: 1, buttons: 4, pointerType: 'mouse' });
+        if (chordPan) {
+          if (want) { chordPan.move(readPoint(e, kind)); hover = { sx: e.clientX, sy: e.clientY, kind }; invalidate(false); return; }
+          chordPan.end(); chordPan = null; updateCursor();
+        }
+      }
       const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
       const list = evs.length ? evs : [e];
       for (const ev of list) gesture.move(readPoint(ev, kind), ev);
@@ -1659,10 +1672,11 @@ function startBoard(room) {
   function onUp(e) {
     if (navGrab && navGrab.up(e)) { if (!navGrab.busy()) navGrab = null; return; }
     if (e.pointerType === 'touch') { touches.delete(e.pointerId); if (pinch && touches.size < 2) { pinch = null; viewChanged(); } }
+    if (chordPan) { chordPan.end(); chordPan = null; }
     if (gesture && gesture.pid === e.pointerId) finishGesture(e);
   }
   function finishGesture(e = null) {
-    const g = gesture; gesture = null; drawEndAt = performance.now();
+    const g = gesture; gesture = null; drawEndAt = performance.now(); drawEndKind = g.kind;
     try { cvOver.releasePointerCapture(g.pid); } catch {}
     if (e && g.finalPoint && e.type === 'pointerup' && Number.isFinite(e.clientX)) { const q = toWorld(e.clientX, e.clientY); g.finalPoint([q[0], q[1], 0.5]); }
     g.end(e || {});
@@ -1688,7 +1702,10 @@ function startBoard(room) {
     { const nav = activeNav(); if (nav && nav.wheel(e)) return; }
     // Перо на Windows: быстрый штрих система принимает за «взмах» и присылает прокрутку, и доска уезжает.
     // Прокрутку во время письма и сразу после него не принимаем (масштаб с Ctrl работает всегда).
-    if (!e.ctrlKey && !e.metaKey && (gesture || performance.now() - drawEndAt < 700)) return;
+    // Это касается только пера и пальца: у мыши «взмахов» не бывает. Перенесли рисунок мышью — колесо крутит доску сразу,
+    // а если кнопка ещё зажата, доска едет, и выделенное едет вместе с курсором.
+    const mouseG = gesture && gesture.kind === 'mouse' && !gesture.pan && !INK_TOOLS.has(S.tool);
+    if (!e.ctrlKey && !e.metaKey && ((gesture && !mouseG) || (drawEndKind !== 'mouse' && performance.now() - drawEndAt < 700))) return;
     // Колесо: вверх/вниз. Shift+колесо: влево/вправо. Ctrl+колесо или щипок на тачпаде: масштаб.
     // Тачпад двумя пальцами: свободно в любую сторону (берём обе оси сразу).
     const k = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? H : 1;
@@ -1703,6 +1720,7 @@ function startBoard(room) {
     if (e.shiftKey && !dx) { dx = dy; dy = 0; }
     S.view.x -= dx; S.view.y -= dy;
     viewChanged();
+    if (mouseG && lastPtr) { const [wx, wy] = toWorld(lastPtr.sx, lastPtr.sy); gesture.move([wx, wy, lastPtr.p, lastPtr.sx, lastPtr.sy], lastPtr.ev); invalidate(false); }
   }, { passive: false });
 
   // курсор подсказывает, что будет: растянуть, сдвинуть
@@ -3501,6 +3519,31 @@ function startBoard(room) {
     }
     return null;
   }
+  // Один шаг кнопки: ×0,8 и ×1,25 — нажали «меньше», потом «больше», и размер вернулся точно.
+  const SCALE_STEP_DOWN = 0.8, SCALE_STEP_UP = 1.25;
+  function scaleSel(k) {
+    const its = [...S.sel].map((id) => items.get(id)).filter((i) => i && !i.locked);
+    if (!its.length) return;
+    let gb = null;
+    for (const it of its) { const w = geomWorldBox(it); gb = gb ? [Math.min(gb[0], w[0]), Math.min(gb[1], w[1]), Math.max(gb[2], w[2]), Math.max(gb[3], w[3])] : w; }
+    const big = Math.max(gb[2] - gb[0], gb[3] - gb[1]);
+    // дальше не пускаем: крошку уже не разглядеть и не ухватить, а гигант не помещается ни на один экран
+    if (k < 1 && big * k < 6) { toast('Меньше уже нельзя'); return; }
+    if (k > 1 && big * k > 60000) { toast('Больше уже нельзя'); return; }
+    // точка, которая стоит на месте: край со стороны панели, по центру. Панель не прыгает, и кнопку можно нажимать подряд
+    const sb = selBar.hidden ? null : selBar.getBoundingClientRect();
+    const barBelow = sb && sb.top > toScreen(0, (gb[1] + gb[3]) / 2)[1];
+    const ax = (gb[0] + gb[2]) / 2, ay = barBelow ? gb[3] : gb[1];
+    const ov = { ids: new Set(its.map((i) => i.id)), ax, ay, k, dx: 0, dy: 0 };
+    if (sb) selBar._pin = { ids: [...S.sel].join(), v: `${S.view.x},${S.view.y},${S.view.z}`, left: selBar.style.left, top: selBar.style.top };
+    act(() => {
+      for (const it of its) {
+        if (SCALE_BAKED.has(it.type)) { setFields(it.id, bakeShape(it, k, k, ax, ay)); continue; }
+        const t = itemTransform(it, ov); setFields(it.id, { x: t.x, y: t.y, s: t.s });
+      }
+    });
+    queueMicrotask(() => { selBar._sync?.(); placeSelBar(); });
+  }
   function mirrorSel() {
     const todo = [...S.sel].map((id) => items.get(id)).filter(Boolean).map((i) => [i, mirrorFields(i)]).filter(([, f]) => f);
     if (todo.length) act(() => { for (const [i, f] of todo) setFields(i.id, f); });
@@ -3560,13 +3603,18 @@ function startBoard(room) {
       if (it.type === 'fig' && WAVE_KINDS.has(it.kind)) {
         const per = it.per || 2;
         const setPer = (q) => set({ per: q, w: Math.max(4, (it.w * q) / per), ...(it.cuts ? { cuts: null } : {}) });
-        if (per < 8) add('plus', 'Ещё полволны', 'Длина волны та же, график становится длиннее', () => setPer(per + 0.5));
-        if (per > 0.5) add('minus', 'Убрать полволны', 'Длина волны та же, график становится короче', () => setPer(per - 0.5));
+        if (per < 8) add('waveMore', 'Ещё полволны', 'Длина волны та же, график становится длиннее', () => setPer(per + 0.5));
+        if (per > 0.5) add('waveLess', 'Убрать полволны', 'Длина волны та же, график становится короче', () => setPer(per - 0.5));
       }
       if (it.type === 'poly' && it.closed && it.pts.length === 3) {
         add('fig:eqtriangle', 'Сделать равносторонним', 'Основание остаётся, вершина встаёт на нужную высоту', () => set(triangleFix(it, 'eq')));
         add('fig:triangle', 'Сделать равнобедренным', 'Вершина встаёт над серединой основания', () => set(triangleFix(it, 'iso')));
       }
+    }
+    // размер всего выделенного целиком: рисунки, надписи, формулы и фигуры уменьшаются вместе, пропорции сохраняются
+    if (its.some((i) => !i.locked)) {
+      add('minus', 'Уменьшить', 'Уменьшить выделенное целиком, пропорции сохраняются', () => scaleSel(SCALE_STEP_DOWN));
+      add('plus', 'Увеличить', 'Увеличить выделенное целиком, пропорции сохраняются', () => scaleSel(SCALE_STEP_UP));
     }
     const dashable = (i) => ['line', 'arrow', 'rect', 'ellipse', 'poly'].includes(i.type);
     if (its.some(dashable)) add('dash', its.filter(dashable).every((i) => i.dash) ? 'Сплошная линия' : 'Пунктир', 'Сплошная / пунктир', () => act(() => { const v = !its.filter(dashable).every((i) => i.dash); for (const i of its) if (dashable(i)) setFields(i.id, { dash: v }); }));
@@ -3582,10 +3630,13 @@ function startBoard(room) {
   function selSizeKind(its) {
     const sized = its.filter((i) => !i.locked && (i.type === 'text' || i.type === 'stroke' || SIZED_SHAPES.includes(i.type)));
     if (!sized.length) return null;
-    if (sized.every((i) => i.type === 'text')) return { k: 'text', v: sized[0].fs || sz('text') };
+    // показываем настоящую толщину: у уменьшенного рисунка линии тоньше, и ползунок это видит
+    const sc = (i) => i.s || 1;
+    if (sized.every((i) => i.type === 'text')) return { k: 'text', v: Math.round((sized[0].fs || sz('text')) * sc(sized[0])) };
     const pen = sized.find((i) => i.type !== 'text' && !(i.type === 'stroke' && i.kind === 'hl'));
-    if (pen) return { k: 'pen', v: Math.round((pen.type === 'stroke' && pen.kind !== 'dash' ? pen.size : pen.size / 0.9) * 2) / 2 };
-    return { k: 'hl', v: sized.find((i) => i.type === 'stroke').size };
+    if (pen) return { k: 'pen', v: Math.round((pen.type === 'stroke' && pen.kind !== 'dash' ? pen.size : pen.size / 0.9) * sc(pen) * 2) / 2 };
+    const hl = sized.find((i) => i.type === 'stroke');
+    return { k: 'hl', v: Math.round(hl.size * sc(hl) * 2) / 2 };
   }
   // ползунок с числом; live — менять выделенное прямо во время перетаскивания (одним шагом отмены)
   function sizeRow(k, get, set, live) {
@@ -3654,6 +3705,10 @@ function startBoard(room) {
     if (selBar.hidden) return;
     const ov = S.ov;
     const busy = (ov && (ov.dx || ov.dy || (ov.k ?? 1) !== 1 || (ov.kx ?? 1) !== 1 || (ov.ky ?? 1) !== 1)) || (gesture && gesture.drawScreen);
+    // после кнопок «Уменьшить» / «Увеличить» панель стоит, где стояла: иначе она перепрыгнет вниз или вверх и кнопка уйдёт из-под пальца
+    const pin = selBar._pin;
+    if (pin && !busy && pin.ids === [...S.sel].join() && pin.v === `${S.view.x},${S.view.y},${S.view.z}`) { selBar.style.left = pin.left; selBar.style.top = pin.top; selBar.classList.remove('away'); return; }
+    selBar._pin = null;
     const bb = !busy && selectionBox();
     if (!bb) { selBar.classList.add('away'); return; }
     const [x0, y0] = toScreen(bb[0], bb[1]), [x1, y1] = toScreen(bb[2], bb[3]);
@@ -3826,9 +3881,10 @@ function startBoard(room) {
         for (const id of S.sel) {
           const it = items.get(id); if (!it || it.locked) continue;
           const put = (f, x) => { if (Math.abs((it[f] ?? -1) - x) > 1e-9) setFields(id, { [f]: x }); }; // без пустых шагов отмены
-          if (k === 'text' && it.type === 'text') put('fs', v);
-          else if (k === 'hl' && it.type === 'stroke' && it.kind === 'hl') put('size', v);
-          else if (k === 'pen' && it.type === 'stroke' && it.kind !== 'hl') put('size', it.kind === 'dash' ? v * 0.9 : v);
+          const q = it.s || 1; // уменьшенный или увеличенный рисунок: толщина на экране = записанная × масштаб
+          if (k === 'text' && it.type === 'text') put('fs', v / q);
+          else if (k === 'hl' && it.type === 'stroke' && it.kind === 'hl') put('size', v / q);
+          else if (k === 'pen' && it.type === 'stroke' && it.kind !== 'hl') put('size', (it.kind === 'dash' ? v * 0.9 : v) / q);
           else if ((k === 'pen' || k === 'shape') && SIZED_SHAPES.includes(it.type)) put('size', v * 0.9);
         }
       });
