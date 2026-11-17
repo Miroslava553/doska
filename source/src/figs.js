@@ -13,6 +13,32 @@ function regularAspect(n) { const p = []; for (let k = 0; k < n; k++) { const a 
 const poly = (pts, hidden = []) => pts.map((p, i) => { const q = pts[(i + 1) % pts.length]; return L(p[0], p[1], q[0], q[1], hidden.includes(i)); });
 
 const DEG = Math.PI / 180;
+
+// ---- сердце, звезда, домик ----
+// Сердце: две полуокружности сверху и две прямые к нижнему острию, касательные к окружностям — без изломов.
+// Строим в настоящих пропорциях (ширина 1, высота HEART_H), потом делим y на высоту.
+const HEART_H = 0.9;
+function heart() {
+  const r = 0.25, cy = 0.25, P = [0.5, HEART_H];
+  const tang = (cx) => { // внешняя точка касания прямой из острия к окружности
+    const dx = P[0] - cx, dy = P[1] - cy, d = Math.hypot(dx, dy), phi = Math.atan2(dy, dx), al = Math.acos(r / d);
+    return cx < 0.5 ? phi + al : phi - al;
+  };
+  const aL = tang(0.25), aR = tang(0.75);
+  const pt = (cx, a) => [cx + r * Math.cos(a), (cy + r * Math.sin(a)) / HEART_H];
+  const tl = pt(0.25, aL), tr = pt(0.75, aR), tip = [0.5, 1];
+  return [
+    E(0.25, cy / HEART_H, r, r / HEART_H, aL, Math.PI * 2), // левая половинка: от касания через верх к ложбинке
+    E(0.75, cy / HEART_H, r, r / HEART_H, Math.PI, Math.PI * 2 + aR), // правая: от ложбинки через верх к касанию
+    L(tr[0], tr[1], tip[0], tip[1]), L(tip[0], tip[1], tl[0], tl[1]),
+  ];
+}
+function star(n = 5, k = 0.382) { // пятиконечная звезда: вершины через одну на большой и малой окружности
+  const p = []; for (let i = 0; i < n * 2; i++) { const a = -Math.PI / 2 + (i * Math.PI) / n, R = i % 2 ? k : 1; p.push([R * Math.cos(a), R * Math.sin(a)]); }
+  const xs = p.map((q) => q[0]), ys = p.map((q) => q[1]); const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  return { pts: p.map(([x, y]) => [(x - x0) / (x1 - x0), (y - y0) / (y1 - y0)]), aspect: (y1 - y0) / (x1 - x0) };
+}
+const STAR = star();
 // angle — ползунок угла в панели фигуры. get(it) → градусы; set(it, deg) → какие поля поменять.
 // Для треугольников и ромба угол задаётся пропорцией рамки, у параллелограмма и трапеции — полем ang.
 const bottomH = (it, h) => ({ h, y: it.y + (it.h - h) * (it.s || 1) }); // нижняя сторона остаётся на месте
@@ -59,6 +85,9 @@ export const FIGS = {
   circumscribed: { name: 'Описанная окружность', g: 'plane', aspect: 1, prims: [...poly([[0.5, 0], [0.933, 0.75], [0.067, 0.75]]), E(0.5, 0.5, 0.5, 0.5)] },
   sine: { name: 'Синусоида', g: 'wave', prims: wave(2, 0), icon: waveIcon(0), make: (it) => (it.per ? wave(it.per, 0) : null) },
   cosine: { name: 'Косинусоида', g: 'wave', prims: wave(2, Math.PI / 2), icon: waveIcon(Math.PI / 2), make: (it) => (it.per ? wave(it.per, Math.PI / 2) : null) },
+  heart: { name: 'Сердце', g: 'deco', aspect: HEART_H, prims: heart() },
+  star: { name: 'Звезда', g: 'deco', aspect: STAR.aspect, prims: poly(STAR.pts) },
+  house: { name: 'Домик', g: 'deco', aspect: 1, prims: [...poly([[0.5, 0], [1, 0.42], [1, 1], [0, 1], [0, 0.42]]), L(0, 0.42, 1, 0.42), L(0.4, 1, 0.4, 0.68), L(0.4, 0.68, 0.6, 0.68), L(0.6, 0.68, 0.6, 1)] },
   axes: { name: 'Оси координат', g: 'plane', prims: [AR(0, 0.5, 1, 0.5), AR(0.5, 1, 0.5, 0), T(0.97, 0.56, 'x'), T(0.53, 0.04, 'y'), T(0.46, 0.56, 'O')] },
   // ---- стереометрия (косоугольная проекция, невидимые рёбра пунктиром) ----
   cube: { name: 'Куб / параллелепипед', g: 'solid', prims: [
@@ -120,7 +149,7 @@ export function figSegments(it) {
 // ---------- заливка ----------
 // Закрасить можно плоские фигуры (замкнутые контуры из их линий и окружности) и тела (по силуэту).
 // Оси и волны не замкнуты, у них заливки нет.
-export const figFillable = (it) => { const f = FIGS[it.kind]; return !!f && (SOLID_KINDS.has(it.kind) || (f.g === 'plane' && it.kind !== 'axes')); };
+export const figFillable = (it) => { const f = FIGS[it.kind]; return !!f && (SOLID_KINDS.has(it.kind) || ((f.g === 'plane' || f.g === 'deco') && it.kind !== 'axes')); };
 const area2 = (p) => { let a = 0; for (let i = 0; i < p.length; i++) { const q = p[(i + 1) % p.length]; a += p[i][0] * q[1] - q[0] * p[i][1]; } return a; };
 export function figFillPath(it) {
   if (!figFillable(it) || typeof Path2D === 'undefined') return null;
@@ -128,12 +157,15 @@ export function figFillPath(it) {
   // все контуры обходим в одну сторону: тогда пересечение (круг внутри треугольника) закрашивается один раз, без дырки
   const addPoly = (pts) => { if (pts.length < 3) return; if (area2(pts) < 0) pts = pts.slice().reverse(); P.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) P.lineTo(pts[i][0], pts[i][1]); P.closePath(); };
   if (SOLID_KINDS.has(it.kind)) { addPoly(convexHull(solidView(it).lines.flatMap((l) => l.pts))); return P; }
-  const { w, h } = it, key = (x, y) => Math.round(x * 1e4) + ',' + Math.round(y * 1e4);
+  const { w, h } = it, key = (x, y) => Math.round(x * 100) + ',' + Math.round(y * 100); // концы считаем совпавшими с точностью до сотой пикселя
   const segs = [];
   for (const p of figPrims(it)) {
     if (p.t === 'l') segs.push([p.a[0] * w, p.a[1] * h, p.a[2] * w, p.a[3] * h]);
     else if (p.t === 'e' && Math.abs(p.a[5] - p.a[4]) >= Math.PI * 2 - 1e-6) {
       const [cx, cy, rx, ry] = p.a; P.moveTo(cx * w + Math.abs(rx * w), cy * h); P.ellipse(cx * w, cy * h, Math.abs(rx * w), Math.abs(ry * h), 0, 0, Math.PI * 2);
+    } else if (p.t === 'e') { // дуга (половинки сердца): мелкими отрезками, чтобы сцепилась с прямыми в один контур
+      const [cx, cy, rx, ry, a0, a1] = p.a, n = 32; let px = (cx + rx * Math.cos(a0)) * w, py = (cy + ry * Math.sin(a0)) * h;
+      for (let i = 1; i <= n; i++) { const a = a0 + ((a1 - a0) * i) / n, qx = (cx + rx * Math.cos(a)) * w, qy = (cy + ry * Math.sin(a)) * h; segs.push([px, py, qx, qy]); px = qx; py = qy; }
     }
   }
   // отрезки сцепляем конец к началу; что замкнулось — контур

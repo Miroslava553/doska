@@ -2388,7 +2388,7 @@ function startBoard(room) {
   // ---------- поворот и вершины у одной выделенной фигуры ----------
   // solid — стереометрия (3D), line — отрезок/стрелка (концы), poly — многоугольники (вершины), rot — эллипс и прочее (только поворот)
   const ROT_R = 13; // радиус дуг поворота вокруг углов рамки
-  const POLY_FIGS = new Set(['triangle', 'eqtriangle', 'rtriangle', 'square', 'parallelogram', 'trapezoid', 'rhombus', 'pentagon', 'hexagon']);
+  const POLY_FIGS = new Set(['triangle', 'eqtriangle', 'rtriangle', 'square', 'parallelogram', 'trapezoid', 'rhombus', 'pentagon', 'hexagon', 'star']);
   function editKind(it) {
     if (!it || it.locked) return null;
     if (it.type === 'fig' && SOLID_KINDS.has(it.kind)) return 'solid';
@@ -3672,6 +3672,9 @@ function startBoard(room) {
         add('fig:triangle', 'Сделать равнобедренным', 'Вершина встаёт над серединой основания', () => set(triangleFix(it, 'iso')));
       }
     }
+    // удалить и дублировать рядом, перед «−» и «+»: так удобнее Мире
+    add('trash', 'Удалить', 'Delete', deleteSelection, 'danger');
+    add('copy', 'Дублировать', 'Ctrl+D', duplicate);
     // размер всего выделенного целиком: рисунки, надписи, формулы и фигуры уменьшаются вместе, пропорции сохраняются
     if (its.some((i) => !i.locked)) {
       add('minus', 'Уменьшить', 'Уменьшить выделенное целиком, пропорции сохраняются', () => scaleSel(SCALE_STEP_DOWN));
@@ -3688,8 +3691,6 @@ function startBoard(room) {
     }
     const dashable = (i) => ['line', 'arrow', 'rect', 'ellipse', 'poly'].includes(i.type);
     if (its.some(dashable)) add('dash', its.filter(dashable).every((i) => i.dash) ? 'Сплошная линия' : 'Пунктир', 'Сплошная / пунктир', () => act(() => { const v = !its.filter(dashable).every((i) => i.dash); for (const i of its) if (dashable(i)) setFields(i.id, { dash: v }); }));
-    add('trash', 'Удалить', 'Delete', deleteSelection, 'danger');
-    add('copy', 'Дублировать', 'Ctrl+D', duplicate);
     if (its.some((i) => mirrorFields(i))) add('mirror', 'Отразить', 'Зеркально слева направо', mirrorSel);
     if (ACCOUNTS && tutorView() && !its.some((i) => i.type === 'shade')) add('eyeOff', 'Скрыть ответ', 'Закрыть выделенное шторкой', hideAnswer);
     add('lock', its.every((i) => i.locked) ? 'Открепить' : 'Закрепить', 'Закреплённое нельзя случайно сдвинуть, выделить рамкой или стереть — Shift+L', toggleLock);
@@ -4454,7 +4455,8 @@ function startBoard(room) {
       sections: [['Основные', ['line', 'dline', 'arrow', 'darrow', 'arrow2', 'arrowin', 'rect', 'ellipse', 'circle', 'poly']],
         ['Планиметрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'plane')],
         ['Тригонометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'wave')],
-        ['Стереометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'solid')]] },
+        ['Стереометрия', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'solid')],
+        ['Разное', FIG_IDS.filter((id) => FIGS[id.slice(4)].g === 'deco')]] },
     more: { tools: ['note', 'image'], name: 'Ещё', sections: [['', ['note', 'image']]] },
   };
   // Порядок по умолчанию: ладонь, выделение, ручки (основная, пунктир, маркер), ластик | фигуры | текст, формула, график, картинка | цвета.
@@ -5116,7 +5118,7 @@ function startBoard(room) {
   // Панель инструментов всегда строго по центру. Строку выбираем только по ширине окна
   // (левая и правая панели имеют фиксированную наибольшую ширину), поэтому при смене инструмента,
   // названия или статуса она не сдвигается ни на пиксель.
-  const LEFT_MAX = 490, RIGHT_W = 470, BAR_LIFT = 30; // слева: название, листы и стрелки отмены
+  const BAR_LIFT = 30, ROW2 = 64; // нижняя панель приподнята от края; второй ряд сверху — на 10px ниже плашек
   // Панель: сверху (по умолчанию), снизу или справа — выбирается в меню
   // «Что нового» — справа сверху, под кнопкой выхода; если там панель инструментов — рядом с ней, не поверх
   function placeWhatsNew() {
@@ -5128,17 +5130,9 @@ function startBoard(room) {
     whatsNew.style.right = Math.round(right) + 'px'; whatsNew.style.top = Math.round(top) + 'px';
   }
   function placeUndo() {
-    const tl = topLeft.getBoundingClientRect(), tr = topRight.getBoundingClientRect();
-    const urW = 2 * 36 + 10; // две кнопки и поля
-    const fitsTop = tl.right + 8 + urW + 8 <= tr.left;
-    if (fitsTop) {
-      if (urBtns[0].parentNode !== urBar) urBar.append(...urBtns);
-      urSep.remove(); urBar.hidden = false;
-      urBar.style.left = Math.round(tl.right + 8) + 'px'; urBar.style.top = Math.round(tl.top) + 'px'; urBar.style.height = Math.round(tl.height) + 'px';
-    } else {
-      if (urBtns[0].parentNode !== zoomBar) zoomBar.prepend(...urBtns, urSep);
-      urBar.hidden = true;
-    }
+    // «Отменить» и «Вернуть» живут внизу, слева от масштаба: верх свободнее, а рука с мышью и так чаще внизу справа
+    if (urBtns[0].parentNode !== zoomBar) zoomBar.prepend(...urBtns, urSep);
+    urBar.hidden = true;
   }
   new ResizeObserver(() => placeUndo()).observe(topLeft);
   function layoutBars() {
@@ -5157,21 +5151,28 @@ function startBoard(room) {
       toasts.style.top = '62px';
     } else {
       toolbar.style.maxHeight = '';
-      const tw = toolbar.offsetWidth; let left = Math.round((W - tw) / 2);
-      if (pos === 'bottom') {
-        // в один ряд с масштабом справа, если помещается
-        const lEdge = 10, rEdge = W - 10 - zoomBar.offsetWidth - 10;
-        if (tw <= rEdge - lEdge && (left < lEdge || left + tw > rEdge)) left = Math.round(Math.min(Math.max(left, lEdge), rEdge - tw));
-      }
-      toolbar.style.left = Math.max(10, left) + 'px';
+      // Панель стоит посередине между соседними плашками, на равных расстояниях от их краёв.
+      // Сверху соседи — левая плашка (меню, название, листы) и правая (статус, ссылка, выход):
+      // помещается между ними — в одну строку, нет — во второй ряд, но середина та же.
+      // Снизу соседи — левый край экрана и плашка масштаба справа.
+      const tw = toolbar.offsetWidth;
+      let a, b;
+      if (pos === 'bottom') { a = 0; b = W - 10 - zoomBar.offsetWidth; }
+      else { a = topLeft.getBoundingClientRect().right; b = topRight.getBoundingClientRect().left; }
+      let left = Math.round((a + b - tw) / 2);
+      const fitsBetween = left >= a + 10 && left + tw <= b - 10;
+      if (pos === 'bottom' && !fitsBetween) left = Math.round((W - tw) / 2); // не влезает рядом с масштабом — по центру экрана, масштаб поднимется над ней
+      left = clamp(left, 10, Math.max(10, W - tw - 10));
+      toolbar.style.left = left + 'px';
       if (pos === 'bottom') {
         toolbar.style.top = H - toolbar.offsetHeight - BAR_LIFT + 'px'; // приподнята от края экрана
         toasts.style.top = '62px';
         bottomUsed = toolbar.offsetHeight + BAR_LIFT;
       } else {
-        const row1 = left >= LEFT_MAX + 20 && left + tw <= W - RIGHT_W - 20;
-        toolbar.style.top = row1 ? '10px' : '58px';
-        toasts.style.top = (row1 ? 10 : 58) + toolbar.offsetHeight + 8 + 'px';
+        // второй ряд — с тем же отступом 10px от верхних плашек, что и от края экрана
+        const top = fitsBetween ? 10 : ROW2;
+        toolbar.style.top = top + 'px';
+        toasts.style.top = top + toolbar.offsetHeight + 8 + 'px';
       }
     }
     // масштаб и строка «новая версия» не должны наезжать на нижнюю панель
@@ -5181,7 +5182,8 @@ function startBoard(room) {
     document.body.style.setProperty('--zoom-bottom', (zoomHit ? bottomUsed + 8 : pos === 'bottom' ? BAR_LIFT : 28) + 'px');
     document.body.style.setProperty('--zoom-right', (pos === 'right' ? W - tb.left + 8 : 10) + 'px');
   }
-  new ResizeObserver(() => { layoutBars(); if (!toolbar.userScrolled) centerCore(); }).observe(document.body);
+  { const ro = new ResizeObserver(() => { layoutBars(); if (!toolbar.userScrolled) centerCore(); });
+    ro.observe(document.body); ro.observe(topLeft); ro.observe(topRight); } // поменялась ширина плашки (название, листы) — панель снова посередине между ними
   function renderStatus(st = hub.status()) {
     const peer = st.peers[0];
     let cls = 'gray', text = 'Нет подключения';
