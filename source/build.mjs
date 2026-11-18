@@ -59,6 +59,7 @@ const SITE_ICONS = `
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="description" content="Онлайн-доска для уроков математики и физики: формулы, графики, фигуры и работа с учеником в реальном времени.">
 <meta property="og:description" content="Онлайн-доска для уроков математики и физики: формулы, графики, фигуры и работа с учеником в реальном времени.">
+<meta name="google-site-verification" content="AwH7aP7xrHGk9NUxln0t4x_3_SDmjtrOhiZ_kvpiRNs">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Lodl">
 <meta property="og:title" content="Lodl · онлайн-доска для занятий">
