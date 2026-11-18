@@ -23,13 +23,14 @@ const css = fs.readFileSync('src/style.css', 'utf8') + '\n' + fs.readFileSync('s
 const esc = (s) => s.replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
 const mjConfig = `window.MathJax={loader:{load:[]},startup:{typeset:false},options:{enableMenu:false,enableAssistiveMml:false,enableEnrichment:false},svg:{fontCache:'none'},tex:{packages:{'[+]':['ams','physics','mhchem','cancel','color','boldsymbol']}}};`;
 
-const page = (js) => `<!doctype html>
+const DATA_ICON = `<link rel="icon" href="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5c7cfa"/><stop offset="1" stop-color="#4263eb"/></linearGradient></defs><rect width="64" height="64" rx="14" fill="url(#g)"/><path d="M14 16h36a5 5 0 0 1 5 5v19a5 5 0 0 1-5 5H28l-9 8v-8h-5a5 5 0 0 1-5-5V21a5 5 0 0 1 5-5z" fill="#fff"/><path d="M18 35c4-9 8-9 11-2s7 6 11-4" fill="none" stroke="#4263eb" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="45.5" cy="25" r="3.2" fill="#ff922b"/></svg>')}">`;
+const page = (js, links = '') => `<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Lodl · онлайн-доска для занятий</title>
-<link rel="icon" href="data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5c7cfa"/><stop offset="1" stop-color="#4263eb"/></linearGradient></defs><rect width="64" height="64" rx="14" fill="url(#g)"/><path d="M14 16h36a5 5 0 0 1 5 5v19a5 5 0 0 1-5 5H28l-9 8v-8h-5a5 5 0 0 1-5-5V21a5 5 0 0 1 5-5z" fill="#fff"/><path d="M18 35c4-9 8-9 11-2s7 6 11-4" fill="none" stroke="#4263eb" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="45.5" cy="25" r="3.2" fill="#ff922b"/></svg>')}">
+${links || DATA_ICON}
 <style>${css}</style>
 </head>
 <body>
@@ -50,9 +51,21 @@ fs.writeFileSync('dist/site/.nojekyll', '');
 for (const f of ['terms.html', 'privacy.html']) { fs.copyFileSync('src/pages/' + f, 'dist/site/' + f); fs.copyFileSync('src/pages/' + f, 'dist/' + f); }
 // Сайт на своём домене с сервером: настоящий вход, оплата через ЮKassa и облако. Лежит в папке lodl/ репозитория, сервер берёт его оттуда.
 fs.mkdirSync('dist/lodl', { recursive: true });
-fs.writeFileSync('dist/lodl/index.html', page(jsLodl));
+// Поисковики и мессенджеры не берут значок, вписанный прямо в страницу, им нужны отдельные файлы по адресу
+const SITE_ICONS = `
+<link rel="icon" href="/favicon.ico" sizes="48x48">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="description" content="Онлайн-доска для уроков математики и физики: формулы, графики, фигуры и работа с учеником в реальном времени.">
+<meta property="og:description" content="Онлайн-доска для уроков математики и физики: формулы, графики, фигуры и работа с учеником в реальном времени.">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Lodl">
+<meta property="og:title" content="Lodl · онлайн-доска для занятий">
+<meta property="og:image" content="https://lodl.ru/icon-512.png">`;
+fs.writeFileSync('dist/lodl/index.html', page(jsLodl, SITE_ICONS));
 fs.writeFileSync('dist/lodl/version.json', JSON.stringify({ v: VERSION, notes: releaseFor(true) }));
-for (const f of ['terms.html', 'privacy.html', 'logo.png', 'favicon.ico', 'robots.txt', 'admin.html']) if (fs.existsSync('src/pages/' + f)) fs.copyFileSync('src/pages/' + f, 'dist/lodl/' + f);
+for (const f of ['terms.html', 'privacy.html', 'logo.png', 'favicon.ico', 'favicon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png', 'robots.txt', 'admin.html']) if (fs.existsSync('src/pages/' + f)) fs.copyFileSync('src/pages/' + f, 'dist/lodl/' + f);
 // Когда домен заработает: MOVE_TO=https://lodl.ru node build.mjs — старый адрес на GitHub переносит доски и ведёт на новый
 if (process.env.MOVE_TO) {
   const to = process.env.MOVE_TO.replace(/\/$/, '');
