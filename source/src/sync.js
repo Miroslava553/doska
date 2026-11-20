@@ -1,5 +1,5 @@
 // Синхронизация: Yjs-документ + «эфемерные» сообщения (курсоры, рисуемые штрихи, лазер)
-// по любым двусторонним каналам: PeerJS (авто), ручной WebRTC (обмен кодами), BroadcastChannel (вкладки).
+// по любым двусторонним каналам: PeerJS (авто), Nostr, наш сервер (запасной путь), ручной WebRTC (обмен кодами), BroadcastChannel (вкладки).
 import * as Y from 'yjs';
 import { Peer } from 'peerjs';
 
@@ -128,6 +128,7 @@ export class Hub {
   // Интернет вернулся или вкладку снова открыли: если прямой связи нет — пробуем сразу, не ждём таймера
   wake() {
     if (!this.room || this.stopped) return;
+    if (this.relay && (!this.relay.ws || this.relay.ws.readyState > 1)) this.connectRelay();
     if ([...this.links].some((l) => l.alive && l.kind === 'peer')) return;
     clearTimeout(this.retryTimer); this.tryHost();
   }
@@ -157,7 +158,8 @@ export class Hub {
     const tabs = [...this.links].filter((l) => l.kind === 'tab').length;
     let nostrOpen = 0, nostrTotal = 0;
     try { const socks = this.getRelaySockets ? this.getRelaySockets() : {}; for (const ws of Object.values(socks)) { nostrTotal++; if (ws && ws.readyState === 1) nostrOpen++; } } catch {}
-    return { peers: [...seen.values()], tabs, peerState: this.peerState, peerError: this.peerError, nostrOpen, nostrTotal, startedAt: this.startedAt || 0, online: !!this.startedAt };
+    const relayOpen = !!(this.relay && this.relay.ws && this.relay.ws.readyState === 1);
+    return { peers: [...seen.values()], tabs, peerState: this.peerState, peerError: this.peerError, nostrOpen, nostrTotal, relayOpen, startedAt: this.startedAt || 0, online: !!this.startedAt };
   }
   broadcast(o) { const s = JSON.stringify(o); for (const l of this.links) if (l.alive) try { l.pipe.send(s); } catch {} }
   addPipe(pipe, kind) {
@@ -180,7 +182,91 @@ export class Hub {
     this.room = room; this.stopped = false; this.startedAt = Date.now();
     this.tryHost();
     this.startNostr(room);
+    this.startRelay(room);
     setInterval(() => this.emitStatus(), 3000);
+  }
+  // --- Через наш сервер (lodl.ru). Работает всегда, когда открывается сам сайт: обычный защищённый канал к серверу в Москве,
+  // без чужих служб. Сервер пересылает куски между участниками доски. Всё зашифровано ключом из ссылки на доску
+  // (часть ссылки после # браузер серверу не отправляет), поэтому сервер содержимое не видит.
+  async startRelay(room) {
+    if (typeof WebSocket === 'undefined' || typeof location === 'undefined' || !/^https?:$/.test(location.protocol) || !globalThis.crypto?.subtle) return;
+    try {
+      const enc = new TextEncoder();
+      const h = new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode('lodl-relay:' + room)));
+      const hex = [...h.subarray(0, 16)].map((b) => b.toString(16).padStart(2, '0')).join('');
+      const key = await crypto.subtle.importKey('raw', await crypto.subtle.digest('SHA-256', enc.encode('lodl-key:' + room)), 'AES-GCM', false, ['encrypt', 'decrypt']);
+      this.relay = { hex, key, tries: 0, pipes: new Map() };
+      this.connectRelay();
+    } catch (e) { console.warn('relay init', e); }
+  }
+  connectRelay() {
+    const R = this.relay;
+    if (!R || this.stopped) return;
+    clearTimeout(R.timer);
+    if (R.ws && R.ws.readyState <= 1) return;
+    let ws;
+    try { ws = new WebSocket(location.origin.replace(/^http/, 'ws') + '/api/relay?room=' + R.hex); } catch { this.retryRelay(); return; }
+    ws.binaryType = 'arraybuffer';
+    R.ws = ws;
+    const enc = new TextEncoder(), dec = new TextDecoder();
+    const inChain = new Map(); // расшифровка асинхронная — держим порядок кусков от каждого участника
+    const drop = (pid) => { const pp = R.pipes.get(pid); R.pipes.delete(pid); inChain.delete(pid); pp?.onclose?.(); };
+    const open = (pid) => {
+      const old = R.pipes.get(pid); if (old && old.link?.alive) return old;
+      let chain = Promise.resolve();
+      const pipe = {
+        send: (d) => {
+          chain = chain.then(async () => {
+            if (ws.readyState !== 1) return;
+            const body = typeof d === 'string' ? concat(Uint8Array.of(0), enc.encode(d)) : concat(Uint8Array.of(1), d instanceof Uint8Array ? d : new Uint8Array(d));
+            const iv = crypto.getRandomValues(new Uint8Array(12));
+            const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, R.key, body));
+            const out = new Uint8Array(16 + ct.length);
+            new DataView(out.buffer).setUint32(0, pid); out.set(iv, 4); out.set(ct, 16);
+            if (ws.readyState === 1) ws.send(out);
+          }).catch(() => {});
+        },
+        close: () => { if (R.pipes.get(pid) === pipe) R.pipes.delete(pid); },
+        onmessage: null, onclose: null,
+      };
+      R.pipes.set(pid, pipe);
+      pipe.link = this.addPipe(pipe, 'relay');
+      return pipe;
+    };
+    ws.onopen = () => { R.tries = 0; this.emitStatus(); };
+    ws.onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        let m; try { m = JSON.parse(e.data); } catch { return; }
+        if (m.t === 'hi') { R.me = m.id; for (const pid of m.peers || []) open(pid); }
+        else if (m.t === 'join') open(m.id);
+        else if (m.t === 'leave') drop(m.id);
+        return;
+      }
+      const u8 = new Uint8Array(e.data);
+      if (u8.length < 17) return;
+      const from = new DataView(u8.buffer).getUint32(0);
+      const prev = inChain.get(from) || Promise.resolve();
+      const next = prev.then(async () => {
+        const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u8.subarray(4, 16) }, R.key, u8.subarray(16)));
+        let pipe = R.pipes.get(from);
+        if (!pipe || !pipe.link?.alive) pipe = open(from); // канал закрыли из-за тишины, а участник снова на связи
+        pipe.onmessage?.(plain[0] === 0 ? dec.decode(plain.subarray(1)) : plain.slice(1));
+      }).catch(() => {}); // чужой ключ или испорченный кусок — молча пропускаем
+      inChain.set(from, next);
+    };
+    ws.onclose = () => {
+      if (R.ws !== ws) return;
+      for (const pid of [...R.pipes.keys()]) drop(pid);
+      this.emitStatus();
+      this.retryRelay();
+    };
+    ws.onerror = () => {};
+  }
+  retryRelay() {
+    const R = this.relay; if (!R || this.stopped) return;
+    clearTimeout(R.timer);
+    const ms = Math.min(15000, 1000 * 2 ** Math.min(R.tries++, 4));
+    R.timer = setTimeout(() => this.connectRelay(), ms + Math.random() * 500);
   }
   // Запасной путь знакомства: открытые Nostr-реле (их десятки по миру, блокировка одного не страшна)
   async startNostr(room) {
@@ -204,7 +290,7 @@ export class Hub {
       };
     } catch (e) { console.warn('nostr signalling failed', e); }
   }
-  stopPeer() { this.stopped = true; this.peer?.destroy(); this.peer = null; this.setPeer('off'); }
+  stopPeer() { this.stopped = true; this.peer?.destroy(); this.peer = null; if (this.relay) { clearTimeout(this.relay.timer); try { this.relay.ws?.close(); } catch {} } this.setPeer('off'); }
   setPeer(s, err = '') { this.peerState = s; this.peerError = err; this.emitStatus(); }
   hostId() { return 'doska-' + this.room.toLowerCase(); }
   peerOpts() { return { config: { iceServers: ICE_SERVERS }, debug: 1 }; }

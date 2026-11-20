@@ -590,6 +590,7 @@ async function handle(req, res) {
 
 const server = http.createServer((req, res) => { handle(req, res).catch((e) => { log('fatal', e); try { res.destroy(); } catch {} }); });
 server.requestTimeout = 10 * 60e3;
+require('./relay.js').attach(server, log); // связь участников доски через наш сервер, когда напрямую не соединиться
 if (require.main === module) {
   server.listen(PORT, '127.0.0.1', () => log(`Lodl на ${PORT}, сайт ${SITE}, ЮKassa ${SHOP ? 'есть' : 'нет'}, автоплатежи ${AUTOPAY ? 'да' : 'нет'}, почта ${mail.ready() ? 'есть' : 'нет'}`));
   const tick = () => renewTick().catch((e) => log('tick', e.stack || e));

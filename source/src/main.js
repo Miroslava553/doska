@@ -5190,10 +5190,10 @@ function startBoard(room) {
     const age = Date.now() - (st.startedAt || Date.now());
     if (peer) { cls = 'green'; text = 'Подключено: ' + peer.name; }
     else if (!st.online) { cls = 'gray'; text = 'Офлайн'; }
-    else if (st.peerState === 'waiting' || st.nostrOpen > 0) { cls = 'yellow'; text = 'Ожидание подключения'; }
+    else if (st.peerState === 'waiting' || st.nostrOpen > 0 || st.relayOpen) { cls = 'yellow'; text = 'Ожидание подключения'; }
     else if (age < 15000) { cls = 'yellow'; text = 'Подключение…'; }
     else { cls = 'red'; text = 'Сервер недоступен'; }
-    statusBtn.title = peer ? `Связь через: ${peer.via.map((v) => ({ peer: 'PeerJS', nostr: 'Nostr', manual: 'ручной код' }[v] || v)).join(', ')}` : 'Код доски и ручное подключение';
+    statusBtn.title = peer ? `Связь через: ${peer.via.map((v) => ({ peer: 'PeerJS', nostr: 'Nostr', relay: 'сервер Lodl', manual: 'ручной код' }[v] || v)).join(', ')}` : 'Код доски и ручное подключение';
     statusBtn.className = 'status ' + cls; statusBtn.innerHTML = '';
     statusBtn.append(el('span', { class: 'led' }), el('span', { class: 'st-txt' }, text)); statusBtn.title = text;
     followBtn.classList.toggle('on', !!S.follow);
